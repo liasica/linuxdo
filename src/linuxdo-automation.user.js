@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Linux.do 自动浏览助手 v2
+// @name         Linux.do 自动浏览助手 v2.1
 // @namespace    https://linux.do/
-// @version      2.0.0
+// @version      2.1.0
 // @description  自动浏览帖子、滚动查看所有回复、随机点赞、避免重复浏览
 // @author       Assistant
 // @match        https://linux.do/*
@@ -13,6 +13,9 @@
 
 (function() {
   'use strict';
+
+  // 为当前标签页生成唯一ID (用于防多开检测)
+  const TAB_ID = Math.random().toString(36).substr(2, 9);
 
   // ==================== 配置参数 ====================
 
@@ -136,13 +139,10 @@
   }
 
   // 检测点赞限制对话框
-  // 实际DOM结构: div#dialog-holder > div.dialog-overlay + div.dialog-content > div.dialog-body(文字) + div.dialog-footer > button.btn-primary
   function checkLikeLimitDialog() {
-    // 查找对话框
     const dialog = document.querySelector('#dialog-holder');
     if (!dialog) return false;
 
-    // 使用 innerText 获取文字内容（比 textContent 更准确）
     const dialogText = dialog.innerText || dialog.textContent || '';
     const limitKeywords = [
       '点赞上限',
@@ -157,16 +157,14 @@
         return true;
       }
     }
-
     return false;
   }
 
-  // 处理点赞限制：关闭点赞并关闭对话框
+  // 处理点赞限制
   function handleLikeLimit() {
     log('已达到点赞上限，自动关闭点赞功能');
     setEnableLike(false, true);
 
-    // 尝试关闭对话框 - 点击 "确定" 按钮
     const closeBtn = document.querySelector(
       '#dialog-holder button.btn-primary, ' +
       '#dialog-holder .dialog-footer button, ' +
@@ -191,7 +189,7 @@
 
   function log(...args) {
     if (CONFIG.debug) {
-      console.log('[LinuxDo自动化]', new Date().toLocaleTimeString(), ...args);
+      console.log(`[LinuxDo自动化|${TAB_ID}]`, new Date().toLocaleTimeString(), ...args);
     }
   }
 
@@ -255,7 +253,7 @@
     }
   }
 
-  // 初始化设置 (Storage类已定义)
+  // 初始化设置
   currentSpeed = Storage.get('speed_preset', 'normal');
   currentList = Storage.get('list_type', 'latest');
   enableLike = Storage.get('enable_like', true);
@@ -269,8 +267,8 @@
       this.liked = new Set(Storage.get('liked_posts', []));
       this.sessionViewed = 0;
       this.sessionLiked = 0;
-      this.sessionReplies = 0;  // 本次浏览的回复数
-      this.totalReplies = Storage.get('total_replies', 0);  // 总计浏览回复数
+      this.sessionReplies = 0;
+      this.totalReplies = Storage.get('total_replies', 0);
     }
 
     isTopicViewed(topicId) {
@@ -300,11 +298,9 @@
       }
     }
 
-    // 记录浏览回复
     addReplyViewed() {
       this.sessionReplies++;
       this.totalReplies++;
-      // 每10个回复保存一次，避免频繁写入
       if (this.sessionReplies % 10 === 0) {
         Storage.set('total_replies', this.totalReplies);
       }
@@ -370,7 +366,7 @@
       const scrollAmount = CONFIG.scrollStep + randomInt(-30, 30);
       window.scrollBy({
         top: scrollAmount,
-        behavior: 'auto'  // 使用 auto 更快
+        behavior: 'auto'
       });
     }
 
@@ -424,22 +420,14 @@
       }
 
       log(`开始浏览话题 ${topicId}...`);
-
-      // 标记为已浏览
       this.history.markTopicViewed(topicId);
       this.onStatsUpdate?.();
 
-      // 确保从第一楼开始浏览
       await this.goToFirstPost(topicId);
-
-      // 滚动到顶部开始
       await this.scrollController.scrollToTop();
       this.scrollController.reset();
-
-      // 开始滚动浏览
       await this.browseAllReplies();
 
-      // 浏览完成，返回列表
       if (this.isRunning) {
         await this.returnToList();
       }
@@ -450,20 +438,15 @@
       log('停止浏览');
     }
 
-    // 跳转到帖子第一楼
     async goToFirstPost(topicId) {
       const currentPath = window.location.pathname;
       const firstPostPath = `/t/topic/${topicId}/1`;
 
-      // 检查是否已经在第一楼附近
       if (currentPath === firstPostPath || currentPath === `/t/topic/${topicId}`) {
-        log('已在帖子顶部');
         return;
       }
 
       log('跳转到帖子第一楼...');
-
-      // 方法1: 尝试点击"跳到第一个帖子"按钮
       const jumpToFirstBtn = document.querySelector('a[href*="/1"][title*="第一"], a.jump-to-first');
       if (jumpToFirstBtn) {
         jumpToFirstBtn.click();
@@ -471,7 +454,6 @@
         return;
       }
 
-      // 方法2: 直接修改URL跳转到第一楼
       window.location.href = firstPostPath;
       await randomDelay(2000, 2500);
     }
@@ -481,36 +463,25 @@
 
       while (this.isRunning) {
         try {
-          // 处理当前可见的帖子
           await this.processVisiblePosts();
-
-          // 更新心跳（即使没有新帖子）
           this.onStatsUpdate?.();
 
-          // 检查是否到达底部
           if (this.scrollController.isAtBottom()) {
             log('到达页面底部，等待加载新内容...');
             await randomDelay(CONFIG.loadWaitTime, CONFIG.loadWaitTime * 1.2);
 
-            // 检查是否有新内容加载
             if (!this.scrollController.hasNewContent()) {
-              log(`无新内容 (${this.scrollController.noNewContentCount}/${CONFIG.noNewContentRetry})`);
-
               if (this.scrollController.isContentFullyLoaded()) {
                 log('所有回复已浏览完成');
                 break;
               }
-            } else {
-              log('检测到新内容加载');
             }
           }
 
-          // 继续滚动
           await this.scrollController.scrollDown();
           await randomDelay(CONFIG.scrollInterval, CONFIG.scrollInterval * 1.3);
         } catch (error) {
           log('浏览回复出错:', error.message);
-          // 出错后短暂等待再继续
           await randomDelay(2000, 3000);
         }
       }
@@ -525,36 +496,29 @@
         if (!this.isRunning) break;
 
         const rect = post.getBoundingClientRect();
-        // 检查帖子是否在视口中
         if (rect.top < viewportHeight * 0.9 && rect.bottom > viewportHeight * 0.1) {
           const postId = post.id.replace('post_', '');
 
           if (!this.viewedPosts.has(postId)) {
             this.viewedPosts.add(postId);
             newPostFound = true;
-
-            // 记录浏览回复数
             this.history.addReplyViewed();
             this.onStatsUpdate?.();
 
-            // 只有发现新帖子时才等待阅读时间
             if (CONFIG.minReadTime > 0) {
               await randomDelay(CONFIG.minReadTime, CONFIG.maxReadTime);
             }
 
-            // 随机决定是否点赞
             if (this.shouldLike()) {
               await this.tryLikePost(post, postId);
             }
           }
         }
       }
-
       return newPostFound;
     }
 
     shouldLike() {
-      // 检查点赞开关
       if (!enableLike) return false;
       if (this.history.sessionLiked >= CONFIG.maxLikesPerSession) return false;
       const now = Date.now();
@@ -563,21 +527,13 @@
     }
 
     async tryLikePost(postElement, postId) {
-      if (this.history.isPostLiked(postId)) {
-        return false;
-      }
+      if (this.history.isPostLiked(postId)) return false;
 
-      // 获取实际的帖子ID (从 data-post-id 属性)
       const actualPostId = postElement.dataset.postId;
-      if (!actualPostId) {
-        log(`无法获取帖子 #${postId} 的实际ID`);
-        return false;
-      }
+      if (!actualPostId) return false;
 
-      // 检查点赞按钮状态，判断是否已点赞
       const likeBtn = postElement.querySelector(
-        'button[title="点赞此帖子"], ' +
-        'button.btn-toggle-reaction-like'
+        'button[title="点赞此帖子"], button.btn-toggle-reaction-like'
       );
       if (likeBtn && (likeBtn.classList.contains('has-like') ||
           likeBtn.classList.contains('my-likes') ||
@@ -587,38 +543,28 @@
 
       try {
         await randomDelay(200, 500);
-
-        // 通过接口发送点赞请求
         const result = await this.sendLikeRequest(actualPostId);
 
         if (result.success) {
           this.history.markPostLiked(postId);
           this.lastLikeTime = Date.now();
           this.onStatsUpdate?.();
-          log(`点赞帖子 #${postId} (ID: ${actualPostId})`);
+          log(`点赞帖子 #${postId}`);
           return true;
         } else if (result.rateLimited) {
-          // 达到点赞上限
-          log(`点赞达到上限，剩余等待: ${result.timeLeft || '未知'}`);
           handleLikeLimit();
           return false;
-        } else {
-          log(`点赞失败: ${result.error}`);
-          return false;
         }
+        return false;
       } catch (e) {
-        log('点赞失败:', e);
         return false;
       }
     }
 
-    // 发送点赞请求到接口
     async sendLikeRequest(postId) {
       try {
         const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content;
-        if (!csrfToken) {
-          return { success: false, error: '无法获取CSRF Token' };
-        }
+        if (!csrfToken) return { success: false };
 
         const response = await fetch(`/discourse-reactions/posts/${postId}/custom-reactions/heart/toggle.json`, {
           method: 'PUT',
@@ -628,42 +574,22 @@
           }
         });
 
-        // 根据状态码判断结果
-        if (response.ok) {
-          return { success: true };
-        }
+        if (response.ok) return { success: true };
 
-        // 解析错误响应
         const data = await response.json().catch(() => ({}));
-
-        // 429 = 速率限制 (达到点赞上限)
         if (response.status === 429 || data.error_type === 'rate_limit') {
-          return {
-            success: false,
-            rateLimited: true,
-            timeLeft: data.extras?.time_left,
-            waitSeconds: data.extras?.wait_seconds,
-            error: data.errors?.[0] || '达到点赞上限'
-          };
+          return { success: false, rateLimited: true };
         }
-
-        return {
-          success: false,
-          error: data.errors?.[0] || `HTTP ${response.status}`
-        };
+        return { success: false };
       } catch (e) {
-        return { success: false, error: e.message };
+        return { success: false };
       }
     }
 
     async returnToList() {
       log('准备返回话题列表...');
       await randomDelay(CONFIG.returnToListDelay, CONFIG.returnToListDelay * 1.5);
-
-      // 使用用户选择的列表
       const returnUrl = LIST_OPTIONS[currentList]?.path || '/latest';
-
-      log(`返回列表: ${returnUrl}`);
       window.location.href = returnUrl;
     }
   }
@@ -686,39 +612,26 @@
       log('开始在列表中查找未浏览的话题...');
       this.scrollController.reset();
 
-      // 先尝试在当前可见区域查找
       let found = await this.findAndEnterUnviewedTopic();
 
-      // 如果没找到，滚动加载更多
       while (this.isRunning && !found) {
         try {
-          // 更新心跳
           this.onStatsUpdate?.();
 
           if (this.scrollController.isAtBottom()) {
-            log('到达列表底部，等待加载...');
             await randomDelay(CONFIG.loadWaitTime, CONFIG.loadWaitTime * 1.2);
-
             if (!this.scrollController.hasNewContent()) {
-              log(`无新话题加载 (${this.scrollController.noNewContentCount}/${CONFIG.noNewContentRetry})`);
-
               if (this.scrollController.isContentFullyLoaded()) {
-                log('列表已全部加载，尝试切换到其他列表');
                 await this.switchToAnotherList();
                 return;
               }
             }
           }
 
-          // 滚动加载更多
           await this.scrollController.scrollDown();
           await randomDelay(CONFIG.scrollInterval, CONFIG.scrollInterval * 1.2);
-
-          // 再次尝试查找
           found = await this.findAndEnterUnviewedTopic();
         } catch (error) {
-          log('列表浏览出错:', error.message);
-          // 出错后短暂等待再继续
           await randomDelay(2000, 3000);
         }
       }
@@ -730,55 +643,38 @@
     }
 
     async findAndEnterUnviewedTopic() {
-      // 获取所有话题链接
-      const topicRows = document.querySelectorAll(
-        '.topic-list-item, ' +
-        'tr[data-topic-id], ' +
-        '.topic-list tr'
-      );
+      const topicRows = document.querySelectorAll('.topic-list-item, tr[data-topic-id], .topic-list tr');
 
       for (const row of topicRows) {
         if (!this.isRunning) return false;
 
-        const titleLink = row.querySelector(
-          '.title a[href*="/t/topic/"], ' +
-          '.link-top-line a[href*="/t/topic/"], ' +
-          'a.title[href*="/t/topic/"]'
-        );
-
+        const titleLink = row.querySelector('.title a[href*="/t/topic/"], .link-top-line a[href*="/t/topic/"], a.title[href*="/t/topic/"]');
         if (!titleLink) continue;
 
         const topicId = getTopicIdFromUrl(titleLink.href);
         if (!topicId) continue;
 
-        // 跳过已扫描的
         if (this.scannedTopics.has(topicId)) continue;
         this.scannedTopics.add(topicId);
 
-        // 检查是否已浏览
         if (this.history.isTopicViewed(topicId)) {
-          // 给已浏览的话题添加视觉标记
           this.markAsViewed(row);
           continue;
         }
 
-        // 找到未浏览的话题
-        log(`找到未浏览话题: ${topicId}`);
-
-        // 检查会话限制
         if (!this.history.canContinue()) {
           log('达到会话限制，停止');
           this.stop();
           return false;
         }
 
-        // 快速滚动到链接位置
         titleLink.scrollIntoView({ behavior: 'auto', block: 'center' });
         await randomDelay(300, 600);
 
-        // 点击进入
         log(`进入话题: ${topicId}`);
-        titleLink.click();
+        // 【核心修复】：移除可能导致新开标签页的target属性，并使用href强制当前页面跳转
+        titleLink.removeAttribute('target');
+        window.location.href = titleLink.href;
         return true;
       }
 
@@ -789,7 +685,6 @@
       if (!row.classList.contains('auto-viewed')) {
         row.classList.add('auto-viewed');
         row.style.opacity = '0.6';
-        // 添加已浏览标记
         const badge = document.createElement('span');
         badge.textContent = '✓';
         badge.style.cssText = 'color: #4CAF50; margin-left: 5px; font-weight: bold;';
@@ -802,9 +697,7 @@
     }
 
     async switchToAnotherList() {
-      // 使用用户选择的列表
       const targetList = LIST_OPTIONS[currentList]?.path || '/latest';
-      log(`当前列表已浏览完，刷新列表: ${targetList}`);
       await randomDelay(1000, 2000);
       window.location.href = targetList;
     }
@@ -819,24 +712,24 @@
       this.listBrowser = null;
       this.isEnabled = false;
       this.panel = null;
-      // 卡住检测
       this.lastActivityTime = Date.now();
       this.stuckCheckInterval = null;
-      this.stuckTimeout = 30000; // 30秒无活动认为卡住
-      // URL变化监听（处理SPA导航）
+      this.stuckTimeout = 30000;
       this.lastUrl = window.location.href;
       this.urlCheckInterval = null;
     }
 
-    // 更新活动时间（心跳）
+    // 附带防多开心跳记录
     heartbeat() {
       this.lastActivityTime = Date.now();
+      if (this.isEnabled) {
+        Storage.set('linuxdo_active_tab_id', TAB_ID);
+        Storage.set('linuxdo_active_tab_time', this.lastActivityTime);
+      }
     }
 
-    // 检查是否卡住
     checkStuck() {
       if (!this.isEnabled) return;
-
       const now = Date.now();
       const elapsed = now - this.lastActivityTime;
 
@@ -846,58 +739,40 @@
       }
     }
 
-    // 重启浏览
     async restartBrowsing() {
-      // 先停止当前浏览器
       this.topicBrowser?.stop();
       this.listBrowser?.stop();
-
-      // 重置状态
       this.heartbeat();
 
-      // 重新开始
       const pageType = getPageType();
-      log(`重启浏览，当前页面: ${pageType}`);
-
       try {
         if (pageType === 'topic') {
-          // 重新创建TopicBrowser实例
           this.topicBrowser = new TopicBrowser(this.history, () => {
             this.updateStats();
             this.heartbeat();
           });
           await this.topicBrowser.start();
         } else if (pageType === 'list') {
-          // 重新创建ListBrowser实例
           this.listBrowser = new TopicListBrowser(this.history, () => {
             this.updateStats();
             this.heartbeat();
           });
           await this.listBrowser.start();
         } else {
-          log('不支持的页面，跳转到列表');
           window.location.href = LIST_OPTIONS[currentList]?.path || '/latest';
         }
       } catch (error) {
-        log('重启出错:', error.message);
-        // 出错后跳转到列表重新开始
         await randomDelay(3000, 5000);
         window.location.href = LIST_OPTIONS[currentList]?.path || '/latest';
       }
     }
 
-    // 启动卡住检测
     startStuckDetection() {
-      if (this.stuckCheckInterval) {
-        clearInterval(this.stuckCheckInterval);
-      }
+      if (this.stuckCheckInterval) clearInterval(this.stuckCheckInterval);
       this.heartbeat();
-      // 每10秒检查一次
       this.stuckCheckInterval = setInterval(() => this.checkStuck(), 10000);
-      log('卡住检测已启动');
     }
 
-    // 停止卡住检测
     stopStuckDetection() {
       if (this.stuckCheckInterval) {
         clearInterval(this.stuckCheckInterval);
@@ -905,18 +780,12 @@
       }
     }
 
-    // 启动URL变化监听（处理SPA导航）
     startUrlWatcher() {
-      if (this.urlCheckInterval) {
-        clearInterval(this.urlCheckInterval);
-      }
+      if (this.urlCheckInterval) clearInterval(this.urlCheckInterval);
       this.lastUrl = window.location.href;
-      // 每500ms检查一次URL是否变化
       this.urlCheckInterval = setInterval(() => this.checkUrlChange(), 500);
-      log('URL监听已启动');
     }
 
-    // 停止URL变化监听
     stopUrlWatcher() {
       if (this.urlCheckInterval) {
         clearInterval(this.urlCheckInterval);
@@ -924,30 +793,22 @@
       }
     }
 
-    // 检查URL是否变化
     checkUrlChange() {
       const currentUrl = window.location.href;
       if (currentUrl !== this.lastUrl) {
         const oldPageType = this.getPageTypeFromUrl(this.lastUrl);
         const newPageType = getPageType();
-        log(`检测到URL变化: ${oldPageType} -> ${newPageType}`);
         this.lastUrl = currentUrl;
 
-        // 更新页面类型显示
         const pageTypeEl = document.getElementById('page-type');
-        if (pageTypeEl) {
-          pageTypeEl.textContent = newPageType;
-        }
+        if (pageTypeEl) pageTypeEl.textContent = newPageType;
 
-        // 如果正在运行且页面类型发生变化，重新初始化浏览器
         if (this.isEnabled && oldPageType !== newPageType) {
-          log('页面类型变化，重新初始化浏览器...');
           this.handlePageTypeChange(newPageType);
         }
       }
     }
 
-    // 从URL解析页面类型
     getPageTypeFromUrl(url) {
       try {
         const path = new URL(url).pathname;
@@ -961,40 +822,29 @@
       }
     }
 
-    // 处理页面类型变化
     async handlePageTypeChange(newPageType) {
-      // 停止当前浏览器
       this.topicBrowser?.stop();
       this.listBrowser?.stop();
-
-      // 等待页面内容加载
       await randomDelay(1000, 1500);
-
-      // 更新心跳
       this.heartbeat();
 
-      // 根据新页面类型启动相应浏览器
       try {
         if (newPageType === 'topic') {
-          log('切换到帖子浏览模式');
           this.topicBrowser = new TopicBrowser(this.history, () => {
             this.updateStats();
             this.heartbeat();
           });
           await this.topicBrowser.start();
         } else if (newPageType === 'list') {
-          log('切换到列表浏览模式');
           this.listBrowser = new TopicListBrowser(this.history, () => {
             this.updateStats();
             this.heartbeat();
           });
           await this.listBrowser.start();
         } else {
-          log('不支持的页面类型，跳转到列表');
           window.location.href = LIST_OPTIONS[currentList]?.path || '/latest';
         }
       } catch (error) {
-        log('页面切换处理出错:', error.message);
         await randomDelay(2000, 3000);
         this.restartBrowsing();
       }
@@ -1009,26 +859,29 @@
     }
 
     setup() {
-      if (!isLoggedIn()) {
-        log('请先登录 Linux.do');
-        return;
-      }
+      if (!isLoggedIn()) return;
 
       this.createControlPanel();
-
-      // 初始化浏览器
       this.topicBrowser = new TopicBrowser(this.history, () => this.updateStats());
       this.listBrowser = new TopicListBrowser(this.history, () => this.updateStats());
 
-      // 检查是否需要自动继续
       const autoResume = Storage.get('auto_running', false);
-      log('脚本已加载, auto_running:', autoResume);
 
       if (autoResume) {
+        // --- 核心修复：防止多开无限自启动 ---
+        const lastActiveTime = Storage.get('linuxdo_active_tab_time', 0);
+        const activeTabId = Storage.get('linuxdo_active_tab_id', null);
+
+        // 如果在15秒内有其他标签页活动，且不是当前标签页，放弃自启
+        if (Date.now() - lastActiveTime < 15000 && activeTabId !== TAB_ID) {
+            log('🚫 检测到其他标签页正在运行自动浏览，当前页面取消自动恢复');
+            this.updateStats();
+            document.getElementById('auto-status').textContent = '多开限制，未自启';
+            return;
+        }
+
         log('检测到自动运行状态，3秒后恢复运行...');
-        // 增加延迟确保页面完全加载
         setTimeout(() => {
-          log('自动恢复运行...');
           this.start();
         }, 3000);
       }
@@ -1039,124 +892,31 @@
       const style = document.createElement('style');
       style.textContent = `
         #linuxdo-auto-panel {
-          position: fixed;
-          top: 80px;
-          right: 20px;
-          z-index: 99999;
+          position: fixed; top: 80px; right: 20px; z-index: 99999;
           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          border-radius: 12px;
-          padding: 16px;
-          box-shadow: 0 4px 20px rgba(0,0,0,0.25);
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-          font-size: 13px;
-          color: #fff;
-          min-width: 240px;
-          transition: all 0.3s ease;
+          border-radius: 12px; padding: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+          font-family: -apple-system, sans-serif; font-size: 13px; color: #fff;
+          min-width: 240px; transition: all 0.3s ease;
         }
-        #linuxdo-auto-panel.minimized {
-          min-width: auto;
-          padding: 10px;
-        }
-        #linuxdo-auto-panel.minimized .panel-content {
-          display: none;
-        }
-        #linuxdo-auto-panel h3 {
-          margin: 0 0 12px 0;
-          font-size: 15px;
-          font-weight: 600;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-        #linuxdo-auto-panel .btn-minimize {
-          background: rgba(255,255,255,0.2);
-          border: none;
-          color: #fff;
-          width: 24px;
-          height: 24px;
-          border-radius: 50%;
-          cursor: pointer;
-          font-size: 14px;
-        }
-        #linuxdo-auto-panel button.action-btn {
-          width: 100%;
-          padding: 10px;
-          margin: 5px 0;
-          border: none;
-          border-radius: 8px;
-          cursor: pointer;
-          font-size: 13px;
-          font-weight: 500;
-          transition: all 0.2s ease;
-        }
-        #linuxdo-auto-panel .speed-selector {
-          display: flex;
-          align-items: center;
-          margin-bottom: 10px;
-          gap: 8px;
-        }
-        #linuxdo-auto-panel .speed-label {
-          font-size: 12px;
-          opacity: 0.9;
-        }
-        #linuxdo-auto-panel .speed-buttons {
-          display: flex;
-          gap: 4px;
-          flex: 1;
-        }
-        #linuxdo-auto-panel .speed-btn {
-          flex: 1;
-          padding: 5px 8px;
-          border: none;
-          border-radius: 4px;
-          background: rgba(255,255,255,0.2);
-          color: #fff;
-          font-size: 11px;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-        #linuxdo-auto-panel .speed-btn:hover {
-          background: rgba(255,255,255,0.3);
-        }
-        #linuxdo-auto-panel .speed-btn.active {
-          background: #4CAF50;
-          font-weight: 600;
-        }
+        #linuxdo-auto-panel.minimized { min-width: auto; padding: 10px; }
+        #linuxdo-auto-panel.minimized .panel-content { display: none; }
+        #linuxdo-auto-panel h3 { margin: 0 0 12px 0; font-size: 15px; font-weight: 600; display: flex; justify-content: space-between; }
+        #linuxdo-auto-panel .btn-minimize { background: rgba(255,255,255,0.2); border: none; color: #fff; width: 24px; height: 24px; border-radius: 50%; cursor: pointer; }
+        #linuxdo-auto-panel button.action-btn { width: 100%; padding: 10px; margin: 5px 0; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; }
+        #linuxdo-auto-panel .speed-selector { display: flex; align-items: center; margin-bottom: 10px; gap: 8px; }
+        #linuxdo-auto-panel .speed-label { font-size: 12px; opacity: 0.9; }
+        #linuxdo-auto-panel .speed-buttons { display: flex; gap: 4px; flex: 1; }
+        #linuxdo-auto-panel .speed-btn { flex: 1; padding: 5px 8px; border: none; border-radius: 4px; background: rgba(255,255,255,0.2); color: #fff; font-size: 11px; cursor: pointer; }
+        #linuxdo-auto-panel .speed-btn.active { background: #4CAF50; font-weight: 600; }
         #linuxdo-auto-panel .btn-start { background: #4CAF50; color: white; }
-        #linuxdo-auto-panel .btn-start:hover { background: #43A047; }
         #linuxdo-auto-panel .btn-stop { background: #f44336; color: white; }
-        #linuxdo-auto-panel .btn-stop:hover { background: #E53935; }
-        #linuxdo-auto-panel .btn-clear { background: #FF9800; color: white; font-size: 12px; padding: 6px; }
-        #linuxdo-auto-panel .stats {
-          margin-top: 12px;
-          padding: 10px;
-          background: rgba(255,255,255,0.15);
-          border-radius: 8px;
-        }
-        #linuxdo-auto-panel .stats-row {
-          display: flex;
-          justify-content: space-between;
-          margin: 4px 0;
-          font-size: 12px;
-        }
-        #linuxdo-auto-panel .stats-label { opacity: 0.9; }
-        #linuxdo-auto-panel .stats-value { font-weight: 600; }
-        #linuxdo-auto-panel .status-indicator {
-          display: inline-block;
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-          margin-right: 6px;
-        }
-        #linuxdo-auto-panel .status-indicator.running {
-          background: #4CAF50;
-          animation: pulse 1.5s infinite;
-        }
+        #linuxdo-auto-panel .btn-clear { background: #FF9800; color: white; padding: 6px; }
+        #linuxdo-auto-panel .stats { margin-top: 12px; padding: 10px; background: rgba(255,255,255,0.15); border-radius: 8px; }
+        #linuxdo-auto-panel .stats-row { display: flex; justify-content: space-between; margin: 4px 0; font-size: 12px; }
+        #linuxdo-auto-panel .status-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        #linuxdo-auto-panel .status-indicator.running { background: #4CAF50; animation: pulse 1.5s infinite; }
         #linuxdo-auto-panel .status-indicator.stopped { background: #f44336; }
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.5; }
-        }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
         .auto-viewed { opacity: 0.6; }
       `;
       document.head.appendChild(style);
@@ -1164,147 +924,64 @@
       const panel = document.createElement('div');
       panel.id = 'linuxdo-auto-panel';
       panel.innerHTML = `
-        <h3>
-          <span>Linux.do 自动浏览助手</span>
-          <button class="btn-minimize" id="btn-minimize">-</button>
-        </h3>
+        <h3><span>Linux.do 自动助手</span><button class="btn-minimize" id="btn-minimize">-</button></h3>
         <div class="panel-content">
-          <div class="speed-selector">
-            <span class="speed-label">速度:</span>
-            <div class="speed-buttons">
-              <button class="speed-btn ${currentSpeed === 'slow' ? 'active' : ''}" data-speed="slow">慢</button>
-              <button class="speed-btn ${currentSpeed === 'normal' ? 'active' : ''}" data-speed="normal">正常</button>
-              <button class="speed-btn ${currentSpeed === 'fast' ? 'active' : ''}" data-speed="fast">快</button>
-              <button class="speed-btn ${currentSpeed === 'turbo' ? 'active' : ''}" data-speed="turbo">极速</button>
-            </div>
-          </div>
-          <div class="speed-selector">
-            <span class="speed-label">列表:</span>
-            <div class="speed-buttons">
-              <button class="speed-btn list-btn ${currentList === 'latest' ? 'active' : ''}" data-list="latest">最新</button>
-              <button class="speed-btn list-btn ${currentList === 'new' ? 'active' : ''}" data-list="new">新帖</button>
-              <button class="speed-btn list-btn ${currentList === 'unread' ? 'active' : ''}" data-list="unread">未读</button>
-            </div>
-          </div>
-          <div class="speed-selector">
-            <span class="speed-label">点赞:</span>
-            <div class="speed-buttons">
-              <button class="speed-btn like-btn ${enableLike ? 'active' : ''}" data-like="true">开启</button>
-              <button class="speed-btn like-btn ${!enableLike ? 'active' : ''}" data-like="false">关闭</button>
-            </div>
-          </div>
-          <div class="speed-selector">
-            <span class="speed-label">点赞概率:</span>
-            <div class="speed-buttons">
-              <button class="speed-btn chance-btn ${currentLikeChance === 'low' ? 'active' : ''}" data-chance="low">低</button>
-              <button class="speed-btn chance-btn ${currentLikeChance === 'medium' ? 'active' : ''}" data-chance="medium">中</button>
-              <button class="speed-btn chance-btn ${currentLikeChance === 'high' ? 'active' : ''}" data-chance="high">高</button>
-              <button class="speed-btn chance-btn ${currentLikeChance === 'veryHigh' ? 'active' : ''}" data-chance="veryHigh">极高</button>
-            </div>
-          </div>
+          <div class="speed-selector"><span class="speed-label">速度:</span><div class="speed-buttons">
+            <button class="speed-btn ${currentSpeed==='slow'?'active':''}" data-speed="slow">慢</button>
+            <button class="speed-btn ${currentSpeed==='normal'?'active':''}" data-speed="normal">正常</button>
+            <button class="speed-btn ${currentSpeed==='fast'?'active':''}" data-speed="fast">快</button>
+            <button class="speed-btn ${currentSpeed==='turbo'?'active':''}" data-speed="turbo">极速</button>
+          </div></div>
+          <div class="speed-selector"><span class="speed-label">列表:</span><div class="speed-buttons">
+            <button class="speed-btn list-btn ${currentList==='latest'?'active':''}" data-list="latest">最新</button>
+            <button class="speed-btn list-btn ${currentList==='new'?'active':''}" data-list="new">新帖</button>
+            <button class="speed-btn list-btn ${currentList==='unread'?'active':''}" data-list="unread">未读</button>
+          </div></div>
+          <div class="speed-selector"><span class="speed-label">点赞:</span><div class="speed-buttons">
+            <button class="speed-btn like-btn ${enableLike?'active':''}" data-like="true">开启</button>
+            <button class="speed-btn like-btn ${!enableLike?'active':''}" data-like="false">关闭</button>
+          </div></div>
           <button class="action-btn btn-start" id="btn-auto-start">开始自动浏览</button>
           <button class="action-btn btn-stop" id="btn-auto-stop" style="display:none;">停止运行</button>
           <button class="action-btn btn-clear" id="btn-clear-history">清除浏览记录</button>
           <div class="stats">
-            <div class="stats-row">
-              <span class="stats-label">状态</span>
-              <span class="stats-value">
-                <span class="status-indicator stopped" id="status-dot"></span>
-                <span id="auto-status">未启动</span>
-              </span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">页面类型</span>
-              <span class="stats-value" id="page-type">-</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">本次帖子</span>
-              <span class="stats-value" id="session-viewed">0</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">本次回复</span>
-              <span class="stats-value" id="session-replies">0</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">本次点赞</span>
-              <span class="stats-value" id="session-liked">0</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">总计帖子</span>
-              <span class="stats-value" id="total-viewed">0</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">总计回复</span>
-              <span class="stats-value" id="total-replies">0</span>
-            </div>
-            <div class="stats-row">
-              <span class="stats-label">总计点赞</span>
-              <span class="stats-value" id="total-liked">0</span>
-            </div>
+            <div class="stats-row"><span class="stats-label">状态</span><span class="stats-value"><span class="status-indicator stopped" id="status-dot"></span><span id="auto-status">未启动</span></span></div>
+            <div class="stats-row"><span class="stats-label">页面类型</span><span class="stats-value" id="page-type">-</span></div>
+            <div class="stats-row"><span class="stats-label">本次帖子/回复</span><span class="stats-value"><span id="session-viewed">0</span> / <span id="session-replies">0</span></span></div>
+            <div class="stats-row"><span class="stats-label">本次点赞</span><span class="stats-value" id="session-liked">0</span></div>
           </div>
         </div>
       `;
-
       document.body.appendChild(panel);
       this.panel = panel;
 
-      // 绑定事件
-      document.getElementById('btn-auto-start').addEventListener('click', () => this.start());
+      document.getElementById('btn-auto-start').addEventListener('click', () => this.start(true));
       document.getElementById('btn-auto-stop').addEventListener('click', () => this.stop());
       document.getElementById('btn-minimize').addEventListener('click', () => this.toggleMinimize());
       document.getElementById('btn-clear-history').addEventListener('click', () => this.clearHistory());
 
-      // 速度选择按钮事件
-      document.querySelectorAll('.speed-btn[data-speed]').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          const speed = e.target.dataset.speed;
-          setSpeed(speed);
-          // 更新按钮状态
-          document.querySelectorAll('.speed-btn[data-speed]').forEach(b => b.classList.remove('active'));
-          e.target.classList.add('active');
-        });
-      });
-
-      // 列表选择按钮事件
-      document.querySelectorAll('.list-btn[data-list]').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          const list = e.target.dataset.list;
-          setList(list);
-          // 更新按钮状态
-          document.querySelectorAll('.list-btn[data-list]').forEach(b => b.classList.remove('active'));
-          e.target.classList.add('active');
-        });
-      });
-
-      // 点赞开关按钮事件
-      document.querySelectorAll('.like-btn[data-like]').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          const enabled = e.target.dataset.like === 'true';
-          setEnableLike(enabled);
-          // 更新按钮状态
-          document.querySelectorAll('.like-btn[data-like]').forEach(b => b.classList.remove('active'));
-          e.target.classList.add('active');
-        });
-      });
-
-      // 点赞概率按钮事件
-      document.querySelectorAll('.chance-btn[data-chance]').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          const chance = e.target.dataset.chance;
-          setLikeChance(chance);
-          // 更新按钮状态
-          document.querySelectorAll('.chance-btn[data-chance]').forEach(b => b.classList.remove('active'));
-          e.target.classList.add('active');
-        });
-      });
+      document.querySelectorAll('.speed-btn[data-speed]').forEach(btn => btn.addEventListener('click', (e) => {
+        setSpeed(e.target.dataset.speed);
+        document.querySelectorAll('.speed-btn[data-speed]').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+      }));
+      document.querySelectorAll('.list-btn[data-list]').forEach(btn => btn.addEventListener('click', (e) => {
+        setList(e.target.dataset.list);
+        document.querySelectorAll('.list-btn[data-list]').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+      }));
+      document.querySelectorAll('.like-btn[data-like]').forEach(btn => btn.addEventListener('click', (e) => {
+        setEnableLike(e.target.dataset.like === 'true');
+        document.querySelectorAll('.like-btn[data-like]').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+      }));
 
       document.getElementById('page-type').textContent = getPageType();
     }
 
     toggleMinimize() {
       this.panel.classList.toggle('minimized');
-      document.getElementById('btn-minimize').textContent =
-        this.panel.classList.contains('minimized') ? '+' : '-';
+      document.getElementById('btn-minimize').textContent = this.panel.classList.contains('minimized') ? '+' : '-';
     }
 
     updateStats() {
@@ -1312,59 +989,54 @@
       document.getElementById('session-viewed').textContent = stats.sessionViewed;
       document.getElementById('session-replies').textContent = stats.sessionReplies;
       document.getElementById('session-liked').textContent = stats.sessionLiked;
-      document.getElementById('total-viewed').textContent = stats.totalViewed;
-      document.getElementById('total-replies').textContent = stats.totalReplies;
-      document.getElementById('total-liked').textContent = stats.totalLiked;
     }
 
-    async start() {
+    async start(isManual = false) {
+      // 如果是手动启动，检查是否有其他正在运行的进程
+      if (isManual) {
+        const lastActiveTime = Storage.get('linuxdo_active_tab_time', 0);
+        const activeTabId = Storage.get('linuxdo_active_tab_id', null);
+        if (Date.now() - lastActiveTime < 15000 && activeTabId !== TAB_ID && Storage.get('auto_running', false)) {
+            if (!confirm('⚠️ 警告：检测到后台已有其他页面正在自动浏览。\\n\\n如果在多页同时运行可能会导致浏览器卡死。强制接管此页码？')) {
+                return;
+            }
+        }
+      }
+
       this.isEnabled = true;
       Storage.set('auto_running', true);
+      this.heartbeat();
 
       document.getElementById('btn-auto-start').style.display = 'none';
       document.getElementById('btn-auto-stop').style.display = 'block';
       document.getElementById('auto-status').textContent = '运行中';
       document.getElementById('status-dot').className = 'status-indicator running';
 
-      // 启动卡住检测
       this.startStuckDetection();
-
-      // 启动URL变化监听（处理SPA导航）
       this.startUrlWatcher();
 
       const pageType = getPageType();
-      log(`当前页面: ${pageType}`);
-
       try {
         if (pageType === 'topic') {
-          // 重新创建实例并绑定心跳
           this.topicBrowser = new TopicBrowser(this.history, () => {
             this.updateStats();
             this.heartbeat();
           });
           await this.topicBrowser.start();
         } else if (pageType === 'list') {
-          // 重新创建实例并绑定心跳
           this.listBrowser = new TopicListBrowser(this.history, () => {
             this.updateStats();
             this.heartbeat();
           });
           await this.listBrowser.start();
         } else {
-          log('不支持的页面，跳转到列表');
           window.location.href = LIST_OPTIONS[currentList]?.path || '/latest';
         }
       } catch (error) {
-        log('运行出错:', error.message);
-        // 出错后等待一段时间再重试
         if (this.isEnabled) {
-          log('5秒后自动重试...');
           document.getElementById('auto-status').textContent = '出错，重试中...';
           await randomDelay(5000, 8000);
-          if (this.isEnabled) {
-            log('重新开始...');
-            this.restartBrowsing();
-          }
+          if (this.isEnabled) this.restartBrowsing();
         }
       }
     }
@@ -1372,13 +1044,10 @@
     stop() {
       this.isEnabled = false;
       Storage.set('auto_running', false);
+      Storage.set('linuxdo_active_tab_time', 0); // 释放占用锁
 
-      // 停止卡住检测
       this.stopStuckDetection();
-
-      // 停止URL变化监听
       this.stopUrlWatcher();
-
       this.topicBrowser?.stop();
       this.listBrowser?.stop();
 
@@ -1400,5 +1069,12 @@
   // ==================== 启动 ====================
   const automation = new LinuxDoAutomation();
   automation.init();
+
+  // 页面卸载时释放占用锁
+  window.addEventListener('beforeunload', () => {
+    if (automation.isEnabled) {
+        Storage.set('linuxdo_active_tab_time', 0);
+    }
+  });
 
 })();
