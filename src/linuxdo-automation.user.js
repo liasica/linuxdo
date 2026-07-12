@@ -202,8 +202,19 @@
     return Math.floor(Math.random() * (max - min + 1)) + min;
   }
 
-  function isLoggedIn() {
-    return document.querySelector('#current-user') !== null;
+  // 登录状态三态检测：true=已登录，false=未登录，null=无法判定（页面未就绪或 Cloudflare 挑战页）
+  // 优先读取 #data-preloaded（服务端直出，脚本注入时必然存在），
+  // 避免与 Ember 渲染 #current-user 竞速导致误判（脚本注入时 header 尚未渲染）
+  function getLoginState() {
+    const preloaded = document.querySelector('#data-preloaded');
+    if (preloaded) {
+      try {
+        return 'currentUser' in JSON.parse(preloaded.dataset.preloaded);
+      } catch (e) {
+        // 解析失败，回退到 DOM 检测
+      }
+    }
+    return document.querySelector('#current-user') !== null ? true : null;
   }
 
   function getPageType() {
@@ -858,8 +869,24 @@
       }
     }
 
-    setup() {
-      if (!isLoggedIn()) return;
+    setup(retryCount = 0) {
+      const loginState = getLoginState();
+
+      // 无法判定登录状态（Ember 未渲染完成或 Cloudflare 挑战页）：轮询等待，最多 10 秒
+      // 挑战页通过后会整页跳转、脚本重新注入，因此超时放弃是安全的
+      if (loginState === null) {
+        if (retryCount < 20) {
+          setTimeout(() => this.setup(retryCount + 1), 500);
+        } else {
+          log('无法检测登录状态，跳过初始化');
+        }
+        return;
+      }
+
+      if (loginState === false) {
+        log('请先登录 Linux.do');
+        return;
+      }
 
       this.createControlPanel();
       this.topicBrowser = new TopicBrowser(this.history, () => this.updateStats());
