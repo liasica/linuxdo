@@ -1,4 +1,4 @@
-# Linux.do 自动浏览助手 v2
+# Linux.do 自动浏览助手 v2 2026
 
 基于 Chrome MCP 研究分析的 Linux.do 论坛自动化浏览工具。
 
