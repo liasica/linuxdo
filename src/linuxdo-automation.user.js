@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do 自动浏览助手 v2.2
 // @namespace    https://linux.do/
-// @version      2.2.0
+// @version      2.2.1
 // @description  自动浏览帖子、滚动查看所有回复、随机点赞、避免重复浏览
 // @author       Assistant
 // @match        https://linux.do/*
@@ -16,7 +16,22 @@
   'use strict';
 
   // 为当前标签页生成唯一ID (用于防多开检测)
-  const TAB_ID = Math.random().toString(36).substr(2, 9);
+  // 必须按“浏览器标签页”稳定，不能每次页面加载都随机：脚本靠整页跳转翻话题，
+  // 若跳转后 ID 变了，锁里存的旧 ID 永远对不上自己，会被误判成“其他标签页在运行”而拒绝自启。
+  // sessionStorage 恰好按标签页隔离且整页跳转后保留：同一标签页翻页 ID 不变，新开标签页 ID 必然不同
+  const TAB_ID = (() => {
+    try {
+      let id = sessionStorage.getItem('linuxdo_tab_id');
+      if (!id) {
+        id = Math.random().toString(36).slice(2, 11);
+        sessionStorage.setItem('linuxdo_tab_id', id);
+      }
+      return id;
+    } catch (e) {
+      // sessionStorage 不可用时退回随机 ID (仅影响防多开的准确性，不影响功能)
+      return Math.random().toString(36).slice(2, 11);
+    }
+  })();
 
   // ==================== 配置参数 ====================
 
@@ -103,8 +118,8 @@
     // 返回列表设置
     returnToListDelay: 1000,      // 返回列表前延迟 (ms)
 
-    // 调试
-    debug: true
+    // 调试 (默认关闭，避免给所有用户刷 console；需要时用 GM_setValue('debug', true) 开启)
+    debug: false
   };
 
   function setSpeed(preset) {
@@ -218,13 +233,16 @@
     return document.querySelector('#current-user') !== null ? true : null;
   }
 
-  function getPageType() {
-    const path = window.location.pathname;
+  function getPageTypeFromPath(path) {
     if (path.match(/^\/t\/topic\/\d+/)) return 'topic';
     if (path === '/latest' || path === '/new' || path === '/unread' ||
         path === '/' || path === '/top' || path === '/hot' ||
         path.startsWith('/c/')) return 'list';
     return 'other';
+  }
+
+  function getPageType() {
+    return getPageTypeFromPath(window.location.pathname);
   }
 
   function getTopicIdFromUrl(url) {
@@ -270,8 +288,29 @@
   currentList = Storage.get('list_type', 'latest');
   enableLike = Storage.get('enable_like', true);
   currentLikeChance = Storage.get('like_chance', 'medium');
+  CONFIG.debug = Storage.get('debug', false);
+
+  // 数据迁移：v2.1.1 起 liked_posts 的键从话题内楼层序号改为全局 post id，
+  // 旧键在新逻辑下全部失配 (脏数据)，一次性清空，避免重访旧话题时把已点赞的帖子误 toggle 取消
+  // (viewed_topics 存的一直是话题 id，语义未变，保留不动)
+  const STORAGE_VERSION = 2;
+  if (Storage.get('storage_version', 1) < STORAGE_VERSION) {
+    Storage.set('liked_posts', []);
+    Storage.set('storage_version', STORAGE_VERSION);
+    log('存储迁移：已重置 liked_posts (点赞去重键格式变更为全局 post id)');
+  }
 
   // ==================== 浏览记录管理 ====================
+
+  // 浏览/点赞记录的最大保留条数，超出后按插入顺序淘汰最旧的，避免长期运行无限膨胀
+  const MAX_HISTORY = 5000;
+
+  // 将 Set 裁剪到不超过 max 条：Set 迭代按插入顺序，从头部删除即淘汰最旧的
+  function trimSet(set, max) {
+    while (set.size > max) {
+      set.delete(set.values().next().value);
+    }
+  }
 
   class BrowsingHistory {
     constructor() {
@@ -281,6 +320,8 @@
       this.sessionLiked = 0;
       this.sessionReplies = 0;
       this.totalReplies = Storage.get('total_replies', 0);
+      // 节流写入的定时器句柄，避免每标记一条就全量序列化落盘
+      this.saveTimer = null;
     }
 
     isTopicViewed(topicId) {
@@ -291,8 +332,9 @@
       const id = String(topicId);
       if (!this.viewed.has(id)) {
         this.viewed.add(id);
+        trimSet(this.viewed, MAX_HISTORY);
         this.sessionViewed++;
-        this.save();
+        this.scheduleSave();
         log(`标记话题 ${id} 为已浏览，本次会话已浏览 ${this.sessionViewed} 个`);
       }
     }
@@ -305,8 +347,9 @@
       const id = String(postId);
       if (!this.liked.has(id)) {
         this.liked.add(id);
+        trimSet(this.liked, MAX_HISTORY);
         this.sessionLiked++;
-        this.save();
+        this.scheduleSave();
       }
     }
 
@@ -314,14 +357,34 @@
       this.sessionReplies++;
       this.totalReplies++;
       if (this.sessionReplies % 10 === 0) {
-        Storage.set('total_replies', this.totalReplies);
+        this.scheduleSave();
       }
     }
 
+    // 节流写入：合并短时间内的多次变更，最多延迟 2 秒统一落盘
+    // 页面卸载时由 beforeunload 调用 save() 兜底 flush，避免翻页丢失最后的记录
+    scheduleSave() {
+      if (this.saveTimer) return;
+      this.saveTimer = setTimeout(() => {
+        this.saveTimer = null;
+        this.save();
+      }, 2000);
+    }
+
     save() {
+      if (this.saveTimer) {
+        clearTimeout(this.saveTimer);
+        this.saveTimer = null;
+      }
       Storage.set('viewed_topics', [...this.viewed]);
       Storage.set('liked_posts', [...this.liked]);
       Storage.set('total_replies', this.totalReplies);
+    }
+
+    // 仅在有节流待写数据时落盘，供 beforeunload 兜底 flush
+    // 无变更的页面 (未启动/未登录/路过) saveTimer 为 null，不写，避免用可能读空的数据覆盖已有历史
+    flushPending() {
+      if (this.saveTimer) this.save();
     }
 
     clearHistory() {
@@ -590,7 +653,7 @@
       }
 
       log('跳转到帖子第一楼...');
-      const jumpToFirstBtn = document.querySelector('a[href*="/1"][title*="第一"], a.jump-to-first');
+      const jumpToFirstBtn = document.querySelector('a[href*="/1"][title*="第一"], a[href*="/1"][title*="first" i], a.jump-to-first');
       if (jumpToFirstBtn) {
         jumpToFirstBtn.click();
         await randomDelay(1500, 2000);
@@ -638,23 +701,23 @@
       for (const post of posts) {
         if (!this.isRunning) break;
 
+        const postId = post.id.replace('post_', '');
+        // 已处理过的楼层直接跳过，避免对全部楼层反复调用 getBoundingClientRect 触发强制回流
+        if (this.viewedPosts.has(postId)) continue;
+
         const rect = post.getBoundingClientRect();
         if (rect.top < viewportHeight * 0.9 && rect.bottom > viewportHeight * 0.1) {
-          const postId = post.id.replace('post_', '');
+          this.viewedPosts.add(postId);
+          newPostFound = true;
+          this.history.addReplyViewed();
+          this.onStatsUpdate?.();
 
-          if (!this.viewedPosts.has(postId)) {
-            this.viewedPosts.add(postId);
-            newPostFound = true;
-            this.history.addReplyViewed();
-            this.onStatsUpdate?.();
+          if (CONFIG.minReadTime > 0) {
+            await randomDelay(CONFIG.minReadTime, CONFIG.maxReadTime);
+          }
 
-            if (CONFIG.minReadTime > 0) {
-              await randomDelay(CONFIG.minReadTime, CONFIG.maxReadTime);
-            }
-
-            if (this.shouldLike()) {
-              await this.tryLikePost(post, postId);
-            }
+          if (this.shouldLike()) {
+            await this.tryLikePost(post, postId);
           }
         }
       }
@@ -670,13 +733,24 @@
     }
 
     async tryLikePost(postElement, postId) {
-      if (this.history.isPostLiked(postId)) return false;
-
+      // 去重键必须用全局唯一的 data-post-id：post.id 里的编号是话题内楼层序号，
+      // 跨话题会碰撞 (话题 A 的 3 楼与话题 B 的 3 楼同号)，用它会误判为已点赞而漏赞
       const actualPostId = postElement.dataset.postId;
       if (!actualPostId) return false;
 
+      if (this.history.isPostLiked(actualPostId)) return false;
+
+      // 已反应检测 (关键防线)：discourse-reactions 插件把已反应状态 (has-reacted /
+      // has-used-main-reaction) 加在外层 .discourse-reactions-actions 容器上、而非按钮本身。
+      // 只要该帖已有任意反应就跳过——否则对已点赞的帖子再 toggle 会取消掉赞，或覆盖用户已选的其它表情
+      const reactionActions = postElement.querySelector('.discourse-reactions-actions');
+      if (reactionActions && /reacted/i.test(reactionActions.className)) {
+        return false;
+      }
+
+      // 兜底：非 reactions 插件的标准 Discourse 点赞按钮，已赞时按钮带 has-like 等 class
       const likeBtn = postElement.querySelector(
-        'button[title="点赞此帖子"], button.btn-toggle-reaction-like'
+        'button[title="点赞此帖子"], button[title="Like this post"], button.btn-toggle-reaction-like'
       );
       if (likeBtn && (likeBtn.classList.contains('has-like') ||
           likeBtn.classList.contains('my-likes') ||
@@ -689,10 +763,10 @@
         const result = await this.sendLikeRequest(actualPostId);
 
         if (result.success) {
-          this.history.markPostLiked(postId);
+          this.history.markPostLiked(actualPostId);
           this.lastLikeTime = Date.now();
           this.onStatsUpdate?.();
-          log(`点赞帖子 #${postId}`);
+          log(`点赞帖子 #${postId} (id=${actualPostId})`);
           return true;
         } else if (result.rateLimited) {
           handleLikeLimit();
@@ -815,8 +889,7 @@
         await randomDelay(300, 600);
 
         log(`进入话题: ${topicId}`);
-        // 【核心修复】：移除可能导致新开标签页的target属性，并使用href强制当前页面跳转
-        titleLink.removeAttribute('target');
+        // 直接改 location 强制当前页跳转 (不点击链接，因此无需理会其 target 属性)
         window.location.href = titleLink.href;
         return true;
       }
@@ -882,28 +955,30 @@
       }
     }
 
+    // 根据页面类型创建对应浏览器并启动；非目标页则跳回列表
+    async runBrowserFor(pageType) {
+      const onUpdate = () => {
+        this.updateStats();
+        this.heartbeat();
+      };
+      if (pageType === 'topic') {
+        this.topicBrowser = new TopicBrowser(this.history, onUpdate);
+        await this.topicBrowser.start();
+      } else if (pageType === 'list') {
+        this.listBrowser = new TopicListBrowser(this.history, onUpdate);
+        await this.listBrowser.start();
+      } else {
+        window.location.href = LIST_OPTIONS[currentList]?.path || '/latest';
+      }
+    }
+
     async restartBrowsing() {
       this.topicBrowser?.stop();
       this.listBrowser?.stop();
       this.heartbeat();
 
-      const pageType = getPageType();
       try {
-        if (pageType === 'topic') {
-          this.topicBrowser = new TopicBrowser(this.history, () => {
-            this.updateStats();
-            this.heartbeat();
-          });
-          await this.topicBrowser.start();
-        } else if (pageType === 'list') {
-          this.listBrowser = new TopicListBrowser(this.history, () => {
-            this.updateStats();
-            this.heartbeat();
-          });
-          await this.listBrowser.start();
-        } else {
-          window.location.href = LIST_OPTIONS[currentList]?.path || '/latest';
-        }
+        await this.runBrowserFor(getPageType());
       } catch (error) {
         await randomDelay(3000, 5000);
         window.location.href = LIST_OPTIONS[currentList]?.path || '/latest';
@@ -954,12 +1029,7 @@
 
     getPageTypeFromUrl(url) {
       try {
-        const path = new URL(url).pathname;
-        if (path.match(/^\/t\/topic\/\d+/)) return 'topic';
-        if (path === '/latest' || path === '/new' || path === '/unread' ||
-            path === '/' || path === '/top' || path === '/hot' ||
-            path.startsWith('/c/')) return 'list';
-        return 'other';
+        return getPageTypeFromPath(new URL(url).pathname);
       } catch (e) {
         return 'other';
       }
@@ -972,21 +1042,7 @@
       this.heartbeat();
 
       try {
-        if (newPageType === 'topic') {
-          this.topicBrowser = new TopicBrowser(this.history, () => {
-            this.updateStats();
-            this.heartbeat();
-          });
-          await this.topicBrowser.start();
-        } else if (newPageType === 'list') {
-          this.listBrowser = new TopicListBrowser(this.history, () => {
-            this.updateStats();
-            this.heartbeat();
-          });
-          await this.listBrowser.start();
-        } else {
-          window.location.href = LIST_OPTIONS[currentList]?.path || '/latest';
-        }
+        await this.runBrowserFor(newPageType);
       } catch (error) {
         await randomDelay(2000, 3000);
         this.restartBrowsing();
@@ -1180,23 +1236,8 @@
       this.startStuckDetection();
       this.startUrlWatcher();
 
-      const pageType = getPageType();
       try {
-        if (pageType === 'topic') {
-          this.topicBrowser = new TopicBrowser(this.history, () => {
-            this.updateStats();
-            this.heartbeat();
-          });
-          await this.topicBrowser.start();
-        } else if (pageType === 'list') {
-          this.listBrowser = new TopicListBrowser(this.history, () => {
-            this.updateStats();
-            this.heartbeat();
-          });
-          await this.listBrowser.start();
-        } else {
-          window.location.href = LIST_OPTIONS[currentList]?.path || '/latest';
-        }
+        await this.runBrowserFor(getPageType());
       } catch (error) {
         if (this.isEnabled) {
           document.getElementById('auto-status').textContent = '出错，重试中...';
@@ -1236,11 +1277,12 @@
   const automation = new LinuxDoAutomation();
   automation.init();
 
-  // 页面卸载时释放占用锁
+  // 页面卸载时把节流未落盘的浏览记录 flush 掉，避免翻页时丢失最后几条记录
+  // flushPending 只在确有待写数据时才写，路过/未登录页面不会触发，避免空数据覆盖历史
+  // 注意：这里不再释放防多开锁——脚本自身翻页也会触发 beforeunload，会导致锁在每次
+  // 跳转间隙被误释放；锁改为依赖 15 秒心跳超时自然失效，手动停止时由 stop() 主动释放
   window.addEventListener('beforeunload', () => {
-    if (automation.isEnabled) {
-        Storage.set('linuxdo_active_tab_time', 0);
-    }
+    automation.history.flushPending();
   });
 
 })();
