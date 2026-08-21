@@ -1,13 +1,14 @@
 // ==UserScript==
-// @name         Linux.do 自动浏览助手 v2.1
+// @name         Linux.do 自动浏览助手 v2.2
 // @namespace    https://linux.do/
-// @version      2.1.0
+// @version      2.2.0
 // @description  自动浏览帖子、滚动查看所有回复、随机点赞、避免重复浏览
 // @author       Assistant
 // @match        https://linux.do/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
+// @grant        unsafeWindow
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -346,6 +347,137 @@
       return this.sessionViewed < CONFIG.maxTopicsPerSession &&
              this.sessionLiked < CONFIG.maxLikesPerSession;
     }
+  }
+
+  // ==================== 阅读量统计 ====================
+
+  // 监听 Discourse 的 /topics/timings 阅读上报接口，请求成功即计入阅读量。
+  // 上报体格式：timings[楼层号]=毫秒&...&topic_time=毫秒&topic_id=话题ID。
+  // 同一楼层长时间停留会被 Discourse 分多次重复上报，因此按「话题ID:楼层号」
+  // 去重累计，与 linux.do 个人资料页「阅读的帖子数」口径一致。
+  // 计数持久化存储，页面刷新/跳转后延续；仅在手动点击「开始」时清零。
+  // 存储跨标签页共享：写回前先与存储对齐（见 syncFromStorage），避免本页
+  // 旧快照覆盖其他标签页的新增，或清零后被其他标签页的旧数据写回
+  class ReadingTracker {
+    constructor() {
+      this.epoch = Storage.get('session_read_epoch', 0);
+      this.readKeys = new Set(Storage.get('session_read_keys', []));
+      this.onUpdate = null;
+    }
+
+    get count() {
+      return this.readKeys.size;
+    }
+
+    addFromBody(body) {
+      try {
+        const params = new URLSearchParams(body);
+        const topicId = params.get('topic_id');
+        if (!topicId) return;
+
+        const newKeys = [];
+        for (const [key, value] of params.entries()) {
+          // 校验条目格式：楼层号与阅读毫秒数都必须是纯数字，异常条目不计入
+          const match = key.match(/^timings\[(\d+)\]$/);
+          if (match && /^\d+$/.test(value)) newKeys.push(`${topicId}:${match[1]}`);
+        }
+        if (newKeys.length === 0) return;
+
+        this.syncFromStorage();
+        let added = 0;
+        for (const readKey of newKeys) {
+          if (!this.readKeys.has(readKey)) {
+            this.readKeys.add(readKey);
+            added++;
+          }
+        }
+        if (added > 0) {
+          Storage.set('session_read_keys', [...this.readKeys]);
+          log(`阅读上报成功，新增 ${added} 条，本次总阅读量 ${this.count}`);
+        }
+        this.onUpdate?.();
+      } catch (e) {
+        log('解析 timings 上报数据失败:', e);
+      }
+    }
+
+    // 与存储对齐：epoch 变化说明其他标签页清零过，丢弃本页内存中的旧数据；
+    // 同一 epoch 则与存储做并集，防止用本页旧快照覆盖其他标签页写入的新增
+    syncFromStorage() {
+      const storedEpoch = Storage.get('session_read_epoch', 0);
+      const storedKeys = Storage.get('session_read_keys', []);
+      if (storedEpoch !== this.epoch) {
+        this.epoch = storedEpoch;
+        this.readKeys = new Set(storedKeys);
+      } else {
+        for (const key of storedKeys) this.readKeys.add(key);
+      }
+    }
+
+    reset() {
+      this.epoch = Date.now();
+      this.readKeys.clear();
+      Storage.set('session_read_epoch', this.epoch);
+      Storage.set('session_read_keys', []);
+      this.onUpdate?.();
+      log('本次总阅读量已清零');
+    }
+  }
+
+  const readingTracker = new ReadingTracker();
+
+  // 拦截 XHR 与 fetch 两条通道的 /topics/timings 上报，响应 2xx 才计数。
+  // hook 必须装在页面真实 window（unsafeWindow）上：带 @grant 的脚本运行在
+  // 脚本管理器沙箱中，改写沙箱自己的 XMLHttpRequest/fetch 拦截不到页面请求
+  function installTimingsHook() {
+    const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const TIMINGS_PATH = '/topics/timings';
+    const isTimingsUrl = (url) => String(url).includes(TIMINGS_PATH);
+    // 沙箱与页面可能不同 realm，不能用 instanceof Request，按结构判断
+    const isRequestLike = (v) => !!v && typeof v === 'object' &&
+      typeof v.url === 'string' && typeof v.clone === 'function';
+
+    const xhrProto = pageWindow.XMLHttpRequest.prototype;
+    const originalOpen = xhrProto.open;
+    const originalSend = xhrProto.send;
+
+    xhrProto.open = function(method, url) {
+      this._isTimingsRequest = isTimingsUrl(url);
+      return originalOpen.apply(this, arguments);
+    };
+
+    xhrProto.send = function(body) {
+      if (this._isTimingsRequest) {
+        this.addEventListener('load', function() {
+          if (this.status >= 200 && this.status < 300) {
+            readingTracker.addFromBody(body);
+          }
+        });
+      }
+      return originalSend.apply(this, arguments);
+    };
+
+    const originalFetch = pageWindow.fetch;
+    pageWindow.fetch = function(input, init) {
+      const url = isRequestLike(input) ? input.url : input;
+      if (!isTimingsUrl(url)) {
+        return originalFetch.apply(this, arguments);
+      }
+
+      // body 可能在 init 上，也可能包在 Request 对象里（后者需 clone 读取）
+      const bodyPromise = init?.body !== undefined && init?.body !== null
+        ? Promise.resolve(init.body)
+        : (isRequestLike(input) ? input.clone().text().catch(() => null) : Promise.resolve(null));
+
+      return originalFetch.apply(this, arguments).then(response => {
+        if (response.ok) {
+          bodyPromise.then(body => {
+            if (body) readingTracker.addFromBody(body);
+          });
+        }
+        return response;
+      });
+    };
   }
 
   // ==================== 滚动控制器 ====================
@@ -889,6 +1021,7 @@
       }
 
       this.createControlPanel();
+      readingTracker.onUpdate = () => this.updateStats();
       this.topicBrowser = new TopicBrowser(this.history, () => this.updateStats());
       this.listBrowser = new TopicListBrowser(this.history, () => this.updateStats());
 
@@ -976,6 +1109,7 @@
             <div class="stats-row"><span class="stats-label">页面类型</span><span class="stats-value" id="page-type">-</span></div>
             <div class="stats-row"><span class="stats-label">本次帖子/回复</span><span class="stats-value"><span id="session-viewed">0</span> / <span id="session-replies">0</span></span></div>
             <div class="stats-row"><span class="stats-label">本次点赞</span><span class="stats-value" id="session-liked">0</span></div>
+            <div class="stats-row"><span class="stats-label">本次总阅读量</span><span class="stats-value" id="session-read-count">0</span></div>
           </div>
         </div>
       `;
@@ -1016,6 +1150,7 @@
       document.getElementById('session-viewed').textContent = stats.sessionViewed;
       document.getElementById('session-replies').textContent = stats.sessionReplies;
       document.getElementById('session-liked').textContent = stats.sessionLiked;
+      document.getElementById('session-read-count').textContent = readingTracker.count;
     }
 
     async start(isManual = false) {
@@ -1028,6 +1163,9 @@
                 return;
             }
         }
+
+        // 手动点击「开始」时清零本次总阅读量（自动恢复运行时不清零，保证刷新/跳转后延续）
+        readingTracker.reset();
       }
 
       this.isEnabled = true;
@@ -1094,6 +1232,7 @@
   }
 
   // ==================== 启动 ====================
+  installTimingsHook();
   const automation = new LinuxDoAutomation();
   automation.init();
 
