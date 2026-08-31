@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Linux.do 自动浏览助手 v2.2
+// @name         Linux.do 自动浏览助手 v2.3
 // @namespace    https://linux.do/
-// @version      2.2.1
+// @version      2.3.0
 // @description  自动浏览帖子、滚动查看所有回复、随机点赞、避免重复浏览
 // @author       Assistant
 // @match        https://linux.do/*
@@ -1108,31 +1108,97 @@
       const style = document.createElement('style');
       style.textContent = `
         #linuxdo-auto-panel {
-          position: fixed; top: 80px; right: 20px; z-index: 99999;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          border-radius: 12px; padding: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.25);
-          font-family: -apple-system, sans-serif; font-size: 13px; color: #fff;
-          min-width: 240px; transition: all 0.3s ease;
+          position: fixed; right: 20px; bottom: 20px; z-index: 99999;
+          width: 264px; box-sizing: border-box;
+          background: linear-gradient(160deg, #6d5bf0 0%, #7c4ddb 55%, #8b5cf6 100%);
+          border: 1px solid rgba(255,255,255,0.14); border-radius: 16px;
+          box-shadow: 0 12px 32px rgba(60,25,120,0.32), 0 2px 8px rgba(0,0,0,0.14);
+          color: #fff; font-size: 13px; line-height: 1.4;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+          user-select: none; -webkit-user-select: none;
+          transition: box-shadow .2s ease, border-radius .2s ease;
         }
-        #linuxdo-auto-panel.minimized { min-width: auto; padding: 10px; }
-        #linuxdo-auto-panel.minimized .panel-content { display: none; }
-        #linuxdo-auto-panel h3 { margin: 0 0 12px 0; font-size: 15px; font-weight: 600; display: flex; justify-content: space-between; }
-        #linuxdo-auto-panel .btn-minimize { background: rgba(255,255,255,0.2); border: none; color: #fff; width: 24px; height: 24px; border-radius: 50%; cursor: pointer; }
-        #linuxdo-auto-panel button.action-btn { width: 100%; padding: 10px; margin: 5px 0; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; }
-        #linuxdo-auto-panel .speed-selector { display: flex; align-items: center; margin-bottom: 10px; gap: 8px; }
-        #linuxdo-auto-panel .speed-label { font-size: 12px; opacity: 0.9; }
-        #linuxdo-auto-panel .speed-buttons { display: flex; gap: 4px; flex: 1; }
-        #linuxdo-auto-panel .speed-btn { flex: 1; padding: 5px 8px; border: none; border-radius: 4px; background: rgba(255,255,255,0.2); color: #fff; font-size: 11px; cursor: pointer; }
-        #linuxdo-auto-panel .speed-btn.active { background: #4CAF50; font-weight: 600; }
-        #linuxdo-auto-panel .btn-start { background: #4CAF50; color: white; }
-        #linuxdo-auto-panel .btn-stop { background: #f44336; color: white; }
-        #linuxdo-auto-panel .btn-clear { background: #FF9800; color: white; padding: 6px; }
-        #linuxdo-auto-panel .stats { margin-top: 12px; padding: 10px; background: rgba(255,255,255,0.15); border-radius: 8px; }
-        #linuxdo-auto-panel .stats-row { display: flex; justify-content: space-between; margin: 4px 0; font-size: 12px; }
-        #linuxdo-auto-panel .status-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-        #linuxdo-auto-panel .status-indicator.running { background: #4CAF50; animation: pulse 1.5s infinite; }
-        #linuxdo-auto-panel .status-indicator.stopped { background: #f44336; }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        #linuxdo-auto-panel.dragging { box-shadow: 0 18px 44px rgba(60,25,120,0.45); }
+        /* Discourse 全局样式会命中 svg 与盒模型，这里用 id 特异性顶回去 */
+        #linuxdo-auto-panel, #linuxdo-auto-panel * { box-sizing: border-box; }
+        #linuxdo-auto-panel svg { display: block; fill: none; stroke: currentColor; }
+
+        /* 收起态：只留一个悬浮球 */
+        #linuxdo-auto-panel.minimized { width: 56px; height: 56px; border-radius: 50%; }
+        #linuxdo-auto-panel.minimized .panel-content,
+        #linuxdo-auto-panel.minimized .panel-title,
+        #linuxdo-auto-panel.minimized .btn-minimize { display: none; }
+        #linuxdo-auto-panel.minimized .panel-header { width: 100%; height: 100%; padding: 0; justify-content: center; cursor: pointer; }
+        #linuxdo-auto-panel.minimized .fab-icon { display: flex; }
+        #linuxdo-auto-panel.minimized:hover { box-shadow: 0 12px 30px rgba(60,25,120,0.5); }
+        /* 悬浮球上的运行指示：绿点 + 呼吸光环 */
+        #linuxdo-auto-panel.minimized.running::before {
+          content: ''; position: absolute; top: 3px; right: 3px; width: 10px; height: 10px;
+          border-radius: 50%; background: #22c55e; border: 2px solid rgba(255,255,255,0.92);
+        }
+        #linuxdo-auto-panel.minimized.running::after {
+          content: ''; position: absolute; inset: -3px; border-radius: 50%;
+          border: 2px solid rgba(74,222,128,0.7); animation: fab-pulse 1.8s ease-out infinite;
+        }
+        @keyframes fab-pulse {
+          0% { transform: scale(1); opacity: .8; }
+          100% { transform: scale(1.35); opacity: 0; }
+        }
+
+        /* 标题栏同时是拖动手柄 */
+        #linuxdo-auto-panel .panel-header {
+          display: flex; align-items: center; gap: 8px; padding: 12px 12px 8px 14px;
+          cursor: grab; touch-action: none;
+        }
+        #linuxdo-auto-panel.dragging .panel-header { cursor: grabbing; }
+        #linuxdo-auto-panel .panel-title { flex: 1; font-size: 14px; font-weight: 600; letter-spacing: .2px; }
+        #linuxdo-auto-panel .fab-icon { display: none; align-items: center; justify-content: center; }
+        #linuxdo-auto-panel .btn-minimize {
+          display: flex; align-items: center; justify-content: center; flex: none;
+          width: 22px; height: 22px; padding: 0; border: 0; border-radius: 7px;
+          background: rgba(255,255,255,0.16); color: #fff; cursor: pointer; transition: background .15s;
+        }
+        #linuxdo-auto-panel .btn-minimize:hover { background: rgba(255,255,255,0.3); }
+
+        #linuxdo-auto-panel .panel-content { padding: 0 14px 14px; animation: panel-in .18s ease; }
+        @keyframes panel-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+        /* 分段选择器 */
+        #linuxdo-auto-panel .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+        #linuxdo-auto-panel .row-label { flex: none; width: 28px; font-size: 12px; color: rgba(255,255,255,0.72); }
+        #linuxdo-auto-panel .seg { display: flex; flex: 1; gap: 2px; padding: 2px; background: rgba(0,0,0,0.16); border-radius: 9px; }
+        #linuxdo-auto-panel .speed-btn {
+          flex: 1 1 0; padding: 5px 0; border: 0; border-radius: 7px; background: transparent;
+          color: rgba(255,255,255,0.78); font-size: 11px; font-family: inherit; cursor: pointer;
+          transition: background .15s, color .15s;
+        }
+        #linuxdo-auto-panel .speed-btn:hover { background: rgba(255,255,255,0.14); color: #fff; }
+        #linuxdo-auto-panel .speed-btn.active { background: #fff; color: #5b3bc4; font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,0.18); }
+
+        /* 动作按钮 */
+        #linuxdo-auto-panel .action-btn {
+          width: 100%; margin-top: 8px; padding: 9px; border: 0; border-radius: 10px;
+          font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer; transition: filter .15s, background .15s;
+        }
+        #linuxdo-auto-panel .action-btn:hover { filter: brightness(1.08); }
+        #linuxdo-auto-panel .btn-start { background: #22c55e; color: #fff; box-shadow: 0 2px 10px rgba(34,197,94,0.32); }
+        #linuxdo-auto-panel .btn-stop { background: #ef4444; color: #fff; box-shadow: 0 2px 10px rgba(239,68,68,0.32); }
+        #linuxdo-auto-panel .btn-clear {
+          padding: 7px; background: transparent; border: 1px solid rgba(255,255,255,0.26);
+          color: rgba(255,255,255,0.82); font-size: 12px; font-weight: 500;
+        }
+        #linuxdo-auto-panel .btn-clear:hover { background: rgba(255,255,255,0.12); }
+
+        /* 统计区 */
+        #linuxdo-auto-panel .stats { margin-top: 10px; padding: 9px 12px; background: rgba(0,0,0,0.14); border-radius: 10px; }
+        #linuxdo-auto-panel .stats-row { display: flex; justify-content: space-between; align-items: center; margin: 5px 0; font-size: 12px; }
+        #linuxdo-auto-panel .stats-label { color: rgba(255,255,255,0.68); }
+        #linuxdo-auto-panel .stats-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+        #linuxdo-auto-panel .status-indicator { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+        #linuxdo-auto-panel .status-indicator.running { background: #22c55e; animation: pulse 1.5s infinite; }
+        #linuxdo-auto-panel .status-indicator.stopped { background: #f87171; }
+
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
         .auto-viewed { opacity: 0.6; }
       `;
       document.head.appendChild(style);
@@ -1140,20 +1206,31 @@
       const panel = document.createElement('div');
       panel.id = 'linuxdo-auto-panel';
       panel.innerHTML = `
-        <h3><span>Linux.do 自动助手</span><button class="btn-minimize" id="btn-minimize">-</button></h3>
+        <div class="panel-header">
+          <span class="fab-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 7v14"/>
+              <path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>
+            </svg>
+          </span>
+          <span class="panel-title">Linux.do 自动助手</span>
+          <button class="btn-minimize" id="btn-minimize" title="收起">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14"/></svg>
+          </button>
+        </div>
         <div class="panel-content">
-          <div class="speed-selector"><span class="speed-label">速度:</span><div class="speed-buttons">
+          <div class="row"><span class="row-label">速度</span><div class="seg">
             <button class="speed-btn ${currentSpeed==='slow'?'active':''}" data-speed="slow">慢</button>
             <button class="speed-btn ${currentSpeed==='normal'?'active':''}" data-speed="normal">正常</button>
             <button class="speed-btn ${currentSpeed==='fast'?'active':''}" data-speed="fast">快</button>
             <button class="speed-btn ${currentSpeed==='turbo'?'active':''}" data-speed="turbo">极速</button>
           </div></div>
-          <div class="speed-selector"><span class="speed-label">列表:</span><div class="speed-buttons">
+          <div class="row"><span class="row-label">列表</span><div class="seg">
             <button class="speed-btn list-btn ${currentList==='latest'?'active':''}" data-list="latest">最新</button>
             <button class="speed-btn list-btn ${currentList==='new'?'active':''}" data-list="new">新帖</button>
             <button class="speed-btn list-btn ${currentList==='unread'?'active':''}" data-list="unread">未读</button>
           </div></div>
-          <div class="speed-selector"><span class="speed-label">点赞:</span><div class="speed-buttons">
+          <div class="row"><span class="row-label">点赞</span><div class="seg">
             <button class="speed-btn like-btn ${enableLike?'active':''}" data-like="true">开启</button>
             <button class="speed-btn like-btn ${!enableLike?'active':''}" data-like="false">关闭</button>
           </div></div>
@@ -1171,6 +1248,13 @@
       `;
       document.body.appendChild(panel);
       this.panel = panel;
+
+      // 默认收起成悬浮球，只在用户展开过后才记住展开态
+      if (Storage.get('panel_minimized', true)) {
+        panel.classList.add('minimized');
+      }
+      this.restorePosition();
+      this.initDrag();
 
       document.getElementById('btn-auto-start').addEventListener('click', () => this.start(true));
       document.getElementById('btn-auto-stop').addEventListener('click', () => this.stop());
@@ -1196,9 +1280,119 @@
       document.getElementById('page-type').textContent = getPageType();
     }
 
+    // 拖动：手柄是标题栏（收起态下它就是整个悬浮球），松手后记住位置
+    // 位移不超过阈值视为点击，收起态下即展开面板
+    initDrag() {
+      const panel = this.panel;
+      const handle = panel.querySelector('.panel-header');
+      const DRAG_THRESHOLD = 4;
+
+      let pointerId = null;
+      let startX = 0, startY = 0, originLeft = 0, originTop = 0, moved = false;
+
+      const onMove = (e) => {
+        if (e.pointerId !== pointerId) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        if (!moved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+        if (!moved) {
+          moved = true;
+          panel.classList.add('dragging');
+        }
+        this.setPosition(originLeft + dx, originTop + dy);
+      };
+
+      const onUp = (e) => {
+        if (e.pointerId !== pointerId) return;
+        try { handle.releasePointerCapture(pointerId); } catch (err) { /* 捕获可能已自动释放 */ }
+        pointerId = null;
+        panel.classList.remove('dragging');
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+
+        if (moved) {
+          this.savePosition();
+        } else if (panel.classList.contains('minimized')) {
+          this.toggleMinimize();
+        }
+      };
+
+      handle.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0 || pointerId !== null) return;
+        if (e.target.closest('button')) return; // 收起按钮走自己的 click
+
+        const rect = panel.getBoundingClientRect();
+        originLeft = rect.left;
+        originTop = rect.top;
+        startX = e.clientX;
+        startY = e.clientY;
+        moved = false;
+        pointerId = e.pointerId;
+
+        try { handle.setPointerCapture(e.pointerId); } catch (err) { /* 部分环境不支持指针捕获 */ }
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+        e.preventDefault();
+      });
+
+      window.addEventListener('resize', () => this.clampPosition());
+    }
+
+    // 改用视口左上角定位，并把面板钳制在可视范围内
+    setPosition(left, top) {
+      const panel = this.panel;
+      const margin = 8;
+      const maxLeft = Math.max(margin, window.innerWidth - panel.offsetWidth - margin);
+      const maxTop = Math.max(margin, window.innerHeight - panel.offsetHeight - margin);
+      panel.style.left = `${Math.round(Math.min(Math.max(left, margin), maxLeft))}px`;
+      panel.style.top = `${Math.round(Math.min(Math.max(top, margin), maxTop))}px`;
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+    }
+
+    clampPosition() {
+      if (!this.panel.style.left) return; // 没拖动过，保持默认右下角锚定
+      const rect = this.panel.getBoundingClientRect();
+      this.setPosition(rect.left, rect.top);
+    }
+
+    savePosition() {
+      const rect = this.panel.getBoundingClientRect();
+      Storage.set('panel_pos', {
+        left: rect.left,
+        top: rect.top,
+        right: window.innerWidth - rect.right,
+        alignRight: rect.left + rect.width / 2 > window.innerWidth / 2
+      });
+    }
+
+    restorePosition() {
+      const pos = Storage.get('panel_pos', null);
+      if (!pos || !Number.isFinite(pos.top)) return;
+      const left = pos.alignRight && Number.isFinite(pos.right)
+        ? window.innerWidth - pos.right - this.panel.offsetWidth
+        : pos.left;
+      if (Number.isFinite(left)) this.setPosition(left, pos.top);
+    }
+
     toggleMinimize() {
-      this.panel.classList.toggle('minimized');
-      document.getElementById('btn-minimize').textContent = this.panel.classList.contains('minimized') ? '+' : '-';
+      const panel = this.panel;
+      const before = panel.getBoundingClientRect();
+      // 面板在屏幕右半边时保持右边缘不动，展开才不会往视口外顶
+      const keepRight = before.left + before.width / 2 > window.innerWidth / 2;
+
+      const minimized = panel.classList.toggle('minimized');
+      Storage.set('panel_minimized', minimized);
+
+      if (panel.style.left) {
+        this.setPosition(keepRight ? before.right - panel.offsetWidth : before.left, before.top);
+      } else if (panel.getBoundingClientRect().top < 0) {
+        // 默认锚在右下角，视口太矮时展开会顶出屏幕，转为绝对定位兜底
+        const rect = panel.getBoundingClientRect();
+        this.setPosition(rect.left, 8);
+      }
     }
 
     updateStats() {
@@ -1232,6 +1426,7 @@
       document.getElementById('btn-auto-stop').style.display = 'block';
       document.getElementById('auto-status').textContent = '运行中';
       document.getElementById('status-dot').className = 'status-indicator running';
+      this.panel.classList.add('running');
 
       this.startStuckDetection();
       this.startUrlWatcher();
@@ -1261,6 +1456,7 @@
       document.getElementById('btn-auto-stop').style.display = 'none';
       document.getElementById('auto-status').textContent = '已停止';
       document.getElementById('status-dot').className = 'status-indicator stopped';
+      this.panel.classList.remove('running');
     }
 
     clearHistory() {
