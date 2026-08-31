@@ -1116,7 +1116,8 @@
           color: #fff; font-size: 13px; line-height: 1.4;
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
           user-select: none; -webkit-user-select: none;
-          transition: box-shadow .2s ease, border-radius .2s ease;
+          /* 尺寸是瞬变的，圆角必须跟着瞬变：否则 50% 圆角会短暂作用在展开后的矩形上，闪出一个大椭圆 */
+          transition: box-shadow .2s ease;
         }
         #linuxdo-auto-panel.dragging { box-shadow: 0 18px 44px rgba(60,25,120,0.45); }
         /* Discourse 全局样式会命中 svg 与盒模型，这里用 id 特异性顶回去 */
