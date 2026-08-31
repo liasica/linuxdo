@@ -1,10 +1,12 @@
 // ==UserScript==
-// @name         Linux.do 自动浏览助手 v2.3
+// @name         Linux.do 自动浏览助手
 // @namespace    https://linux.do/
-// @version      2.3.0
-// @description  自动浏览帖子、滚动查看所有回复、随机点赞、避免重复浏览
+// @version      2.4.1
+// @description  自动浏览帖子、滚动查看所有回复、随机点赞、避免重复浏览、可限定每帖浏览楼层数
 // @author       Assistant
 // @match        https://linux.do/*
+// @downloadURL  https://raw.githubusercontent.com/liasica/linuxdo/feature/src/linuxdo-automation.user.js
+// @updateURL    https://raw.githubusercontent.com/liasica/linuxdo/feature/src/linuxdo-automation.user.js
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
@@ -15,7 +17,7 @@
 (function() {
   'use strict';
 
-  // 为当前标签页生成唯一ID (用于防多开检测)
+  // 为当前标签页生成唯一ID（用于防多开检测）
   // 必须按“浏览器标签页”稳定，不能每次页面加载都随机：脚本靠整页跳转翻话题，
   // 若跳转后 ID 变了，锁里存的旧 ID 永远对不上自己，会被误判成“其他标签页在运行”而拒绝自启。
   // sessionStorage 恰好按标签页隔离且整页跳转后保留：同一标签页翻页 ID 不变，新开标签页 ID 必然不同
@@ -28,14 +30,14 @@
       }
       return id;
     } catch (e) {
-      // sessionStorage 不可用时退回随机 ID (仅影响防多开的准确性，不影响功能)
+      // sessionStorage 不可用时退回随机 ID（仅影响防多开的准确性，不影响功能）
       return Math.random().toString(36).slice(2, 11);
     }
   })();
 
   // ==================== 配置参数 ====================
 
-  // 速度预设 (进一步调整避免429错误)
+  // 速度预设（进一步调整避免429错误）
   const SPEED_PRESETS = {
     slow: {
       name: '慢速',
@@ -75,7 +77,7 @@
     }
   };
 
-  // 当前速度设置 (延迟初始化，等Storage类定义后再读取)
+  // 当前速度设置（延迟初始化，等Storage类定义后再读取）
   let currentSpeed = 'normal';
 
   // 列表选择设置
@@ -98,6 +100,11 @@
   };
   let currentLikeChance = 'medium';
 
+  // 楼层限制：每帖只浏览前 N 楼就换下一帖，0 表示不限
+  let floorLimit = 0;
+  // 楼层限制的计数口径：开启后已读楼层滚过不计数，只数上次阅读位置之后的新楼层
+  let floorLimitUnreadOnly = false;
+
   const CONFIG = {
     // 动态从速度预设获取
     get scrollStep() { return SPEED_PRESETS[currentSpeed].scrollStep; },
@@ -107,7 +114,7 @@
     get maxReadTime() { return SPEED_PRESETS[currentSpeed].maxReadTime; },
     get noNewContentRetry() { return SPEED_PRESETS[currentSpeed].noNewContentRetry; },
 
-    // 点赞设置 (动态从预设获取)
+    // 点赞设置（动态从预设获取）
     get likeChance() { return LIKE_CHANCE_PRESETS[currentLikeChance].value; },
     minLikeInterval: 2000,        // 最小点赞间隔 (ms)
 
@@ -118,7 +125,10 @@
     // 返回列表设置
     returnToListDelay: 1000,      // 返回列表前延迟 (ms)
 
-    // 调试 (默认关闭，避免给所有用户刷 console；需要时用 GM_setValue('debug', true) 开启)
+    // 时间线「返回」按钮的最长等待时间 (ms)，等不到就留在原地读
+    backButtonWaitTime: 2500,
+
+    // 调试（默认关闭，避免给所有用户刷 console；需要时用 GM_setValue('debug', true) 开启）
     debug: false
   };
 
@@ -154,42 +164,11 @@
     }
   }
 
-  // 检测点赞限制对话框
-  function checkLikeLimitDialog() {
-    const dialog = document.querySelector('#dialog-holder');
-    if (!dialog) return false;
-
-    const dialogText = dialog.innerText || dialog.textContent || '';
-    const limitKeywords = [
-      '点赞上限',
-      '分享很多爱',
-      'like limit',
-      'sharing a lot of love'
-    ];
-
-    for (const keyword of limitKeywords) {
-      if (dialogText.includes(keyword)) {
-        log('检测到点赞限制提示！');
-        return true;
-      }
-    }
-    return false;
-  }
-
-  // 处理点赞限制
+  // 处理点赞限制：点赞走 API 直连（sendLikeRequest），命中 429/rate_limit 时调用，
+  // 直接关掉点赞开关避免继续触发风控（API 点赞不弹 UI 对话框，故无需检测或关闭弹窗）
   function handleLikeLimit() {
     log('已达到点赞上限，自动关闭点赞功能');
     setEnableLike(false, true);
-
-    const closeBtn = document.querySelector(
-      '#dialog-holder button.btn-primary, ' +
-      '#dialog-holder .dialog-footer button, ' +
-      '#dialog-holder button'
-    );
-    if (closeBtn) {
-      closeBtn.click();
-      log('已关闭点赞限制对话框');
-    }
   }
 
   function setLikeChance(preset) {
@@ -199,6 +178,19 @@
       const percent = Math.round(LIKE_CHANCE_PRESETS[preset].value * 100);
       log(`点赞概率设置为: ${LIKE_CHANCE_PRESETS[preset].name} (${percent}%)`);
     }
+  }
+
+  function setFloorLimit(value) {
+    const n = Math.max(0, Math.floor(Number(value) || 0));
+    floorLimit = n;
+    Storage.set('floor_limit', n);
+    log(`楼层限制设置为: ${n > 0 ? `前 ${n} 楼` : '不限'}`);
+  }
+
+  function setFloorLimitUnreadOnly(enabled) {
+    floorLimitUnreadOnly = enabled;
+    Storage.set('floor_limit_unread_only', enabled);
+    log(`楼层限制口径: ${enabled ? '只计未读楼层' : '按楼层号'}`);
   }
 
   // ==================== 工具函数 ====================
@@ -224,10 +216,15 @@
   function getLoginState() {
     const preloaded = document.querySelector('#data-preloaded');
     if (preloaded) {
-      try {
-        return 'currentUser' in JSON.parse(preloaded.dataset.preloaded);
-      } catch (e) {
-        // 解析失败，回退到 DOM 检测
+      // 新版 Discourse 把预加载数据放进 <script id="data-preloaded" type="application/json"> 的文本内容里；
+      // 旧版是 <div id="data-preloaded" data-preloaded="{...}">。先取 textContent，再回退 dataset 兼容旧版
+      const raw = preloaded.textContent || preloaded.dataset.preloaded;
+      if (raw) {
+        try {
+          return 'currentUser' in JSON.parse(raw);
+        } catch (e) {
+          // 解析失败，回退到 DOM 检测
+        }
       }
     }
     return document.querySelector('#current-user') !== null ? true : null;
@@ -252,6 +249,46 @@
 
   function getCurrentTopicId() {
     return getTopicIdFromUrl(window.location.pathname);
+  }
+
+  // 读取当前话题「上次读到第几楼」（Discourse 的 last_read_post_number）
+  // 数据取自服务端直出的 #data-preloaded：它是 <script type="application/json">，
+  // 数据在 textContent 里，且话题对象被二次 JSON 编码（顶层 value 本身是字符串）
+  // 未登录、非话题页或该帖从未读过时返回 0
+  function getLastReadPostNumber(topicId) {
+    try {
+      const el = document.querySelector('#data-preloaded');
+      if (!el) return 0;
+      const raw = JSON.parse(el.textContent)[`topic_${topicId}`];
+      if (!raw) return 0;
+      const topic = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return Number(topic.last_read_post_number) || 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  // Discourse 的「返回」按钮（i18n 键 topic.timeline.back，悬浮提示「返回上一个未读帖子」），
+  // 点击等价于 jumpToPost(topic.last_read_post_number)，即跳回上次读到的楼层。
+  // 宽屏渲染在右侧时间线的 scroller 内 (button.back-button)，
+  // 窄屏/移动端渲染在底部进度条上 (button.progress-back)，两处都兜住
+  const BACK_BUTTON_SELECTOR = [
+    '.topic-timeline button.back-button',
+    '.timeline-container button.back-button',
+    '#topic-progress-wrapper button.progress-back',
+    '.progress-back-container button.progress-back'
+  ].join(', ');
+
+  // 时间线由 Ember 异步渲染，且「返回」只在当前位置落后于上次阅读位置时才出现，
+  // 所以轮询等待而不是取一次就走；超时返回 null，由调用方决定退路
+  async function waitForBackButton(timeout) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const btn = document.querySelector(BACK_BUTTON_SELECTOR);
+      if (btn && btn.offsetParent !== null) return btn;
+      await randomDelay(200, 350);
+    }
+    return null;
   }
 
   // ==================== 存储管理 ====================
@@ -288,11 +325,13 @@
   currentList = Storage.get('list_type', 'latest');
   enableLike = Storage.get('enable_like', true);
   currentLikeChance = Storage.get('like_chance', 'medium');
+  floorLimit = Storage.get('floor_limit', 0);
+  floorLimitUnreadOnly = Storage.get('floor_limit_unread_only', false);
   CONFIG.debug = Storage.get('debug', false);
 
   // 数据迁移：v2.1.1 起 liked_posts 的键从话题内楼层序号改为全局 post id，
-  // 旧键在新逻辑下全部失配 (脏数据)，一次性清空，避免重访旧话题时把已点赞的帖子误 toggle 取消
-  // (viewed_topics 存的一直是话题 id，语义未变，保留不动)
+  // 旧键在新逻辑下全部失配（脏数据），一次性清空，避免重访旧话题时把已点赞的帖子误 toggle 取消
+  // （viewed_topics 存的一直是话题 id，语义未变，保留不动）
   const STORAGE_VERSION = 2;
   if (Storage.get('storage_version', 1) < STORAGE_VERSION) {
     Storage.set('liked_posts', []);
@@ -382,7 +421,7 @@
     }
 
     // 仅在有节流待写数据时落盘，供 beforeunload 兜底 flush
-    // 无变更的页面 (未启动/未登录/路过) saveTimer 为 null，不写，避免用可能读空的数据覆盖已有历史
+    // 无变更的页面（未启动/未登录/路过） saveTimer 为 null，不写，避免用可能读空的数据覆盖已有历史
     flushPending() {
       if (this.saveTimer) this.save();
     }
@@ -612,6 +651,10 @@
       this.isRunning = false;
       this.viewedPosts = new Set();
       this.lastLikeTime = 0;
+      // 进入本帖时的已读楼层号，「只计未读」时以它为计数起点
+      this.floorBaseline = 0;
+      this.unreadFloorsRead = 0;
+      this.floorLimitReached = false;
     }
 
     async start() {
@@ -629,8 +672,18 @@
       this.history.markTopicViewed(topicId);
       this.onStatsUpdate?.();
 
-      await this.goToFirstPost(topicId);
-      await this.scrollController.scrollToTop();
+      // 进入时先取已读位置快照：它既是「只计未读」的计数起点，也用来判断该续读还是从头读
+      this.floorBaseline = getLastReadPostNumber(topicId);
+      this.unreadFloorsRead = 0;
+      this.floorLimitReached = false;
+
+      if (this.floorBaseline > 0) {
+        // 读过一部分的帖子：点时间线上的「返回」回到上次位置续读，不再从第一楼重刷
+        await this.resumeFromLastRead();
+      } else {
+        await this.goToFirstPost(topicId);
+        await this.scrollController.scrollToTop();
+      }
       this.scrollController.reset();
       await this.browseAllReplies();
 
@@ -664,6 +717,22 @@
       await randomDelay(2000, 2500);
     }
 
+    // 时间线上出现「返回」就点它，跳回上次读到的楼层继续。
+    // 等不到按钮（进度条尚未渲染，或当前位置本就在上次阅读处）就留在原地读
+    // —— 此时 Discourse 进入话题时已自动定位到上次位置，强行跳第一楼只会重刷已读楼层
+    async resumeFromLastRead() {
+      const btn = await waitForBackButton(CONFIG.backButtonWaitTime);
+      if (!btn) {
+        log(`未出现「返回」按钮，从当前位置继续 (上次读到第 ${this.floorBaseline} 楼)`);
+        return false;
+      }
+
+      log(`点击时间线「返回」，回到第 ${this.floorBaseline} 楼继续阅读`);
+      btn.click();
+      await randomDelay(CONFIG.loadWaitTime, CONFIG.loadWaitTime * 1.3);
+      return true;
+    }
+
     async browseAllReplies() {
       log('开始滚动浏览所有回复...');
 
@@ -671,6 +740,8 @@
         try {
           await this.processVisiblePosts();
           this.onStatsUpdate?.();
+
+          if (this.floorLimitReached) break;
 
           if (this.scrollController.isAtBottom()) {
             log('到达页面底部，等待加载新内容...');
@@ -707,8 +778,17 @@
 
         const rect = post.getBoundingClientRect();
         if (rect.top < viewportHeight * 0.9 && rect.bottom > viewportHeight * 0.1) {
+          // article 的 id 编号就是话题内楼层序号（post_12 即第 12 楼），到限额就收工换下一帖
+          const floor = Number(postId);
+          if (this.isOverFloorLimit(floor)) {
+            this.floorLimitReached = true;
+            log(`已达楼层限制，本帖浏览到第 ${floor - 1} 楼为止`);
+            break;
+          }
+
           this.viewedPosts.add(postId);
           newPostFound = true;
+          if (floor > this.floorBaseline) this.unreadFloorsRead++;
           this.history.addReplyViewed();
           this.onStatsUpdate?.();
 
@@ -724,6 +804,14 @@
       return newPostFound;
     }
 
+    // 楼层限额判定：默认按绝对楼层号卡（只看前 N 楼）；
+    // 开启「只计未读」后改按实际浏览到的未读楼层个数卡，已读楼层滚过不计数
+    isOverFloorLimit(floor) {
+      if (floorLimit <= 0) return false;
+      if (floorLimitUnreadOnly) return this.unreadFloorsRead >= floorLimit;
+      return Number.isFinite(floor) && floor > floorLimit;
+    }
+
     shouldLike() {
       if (!enableLike) return false;
       if (this.history.sessionLiked >= CONFIG.maxLikesPerSession) return false;
@@ -734,13 +822,13 @@
 
     async tryLikePost(postElement, postId) {
       // 去重键必须用全局唯一的 data-post-id：post.id 里的编号是话题内楼层序号，
-      // 跨话题会碰撞 (话题 A 的 3 楼与话题 B 的 3 楼同号)，用它会误判为已点赞而漏赞
+      // 跨话题会碰撞（话题 A 的 3 楼与话题 B 的 3 楼同号），用它会误判为已点赞而漏赞
       const actualPostId = postElement.dataset.postId;
       if (!actualPostId) return false;
 
       if (this.history.isPostLiked(actualPostId)) return false;
 
-      // 已反应检测 (关键防线)：discourse-reactions 插件把已反应状态 (has-reacted /
+      // 已反应检测（关键防线）：discourse-reactions 插件把已反应状态 (has-reacted /
       // has-used-main-reaction) 加在外层 .discourse-reactions-actions 容器上、而非按钮本身。
       // 只要该帖已有任意反应就跳过——否则对已点赞的帖子再 toggle 会取消掉赞，或覆盖用户已选的其它表情
       const reactionActions = postElement.querySelector('.discourse-reactions-actions');
@@ -889,7 +977,7 @@
         await randomDelay(300, 600);
 
         log(`进入话题: ${topicId}`);
-        // 直接改 location 强制当前页跳转 (不点击链接，因此无需理会其 target 属性)
+        // 直接改 location 强制当前页跳转（不点击链接，因此无需理会其 target 属性）
         window.location.href = titleLink.href;
         return true;
       }
@@ -1180,6 +1268,31 @@
         #linuxdo-auto-panel .speed-btn:hover { background: rgba(255,255,255,0.14); color: #fff; }
         #linuxdo-auto-panel .speed-btn.active { background: #fff; color: #5b3bc4; font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,0.18); }
 
+        /* 楼层限制：数字输入框 + 勾选框 */
+        #linuxdo-auto-panel .floor-input {
+          flex: 1; min-width: 0; height: 27px; padding: 0 8px;
+          border: 1px solid rgba(255,255,255,0.24); border-radius: 8px;
+          background: rgba(0,0,0,0.16); color: #fff;
+          font-size: 12px; font-family: inherit; text-align: center;
+          /* 面板整体禁选，输入框要单独放开才能编辑 */
+          user-select: text; -webkit-user-select: text;
+        }
+        #linuxdo-auto-panel .floor-input::placeholder { color: rgba(255,255,255,0.5); }
+        #linuxdo-auto-panel .floor-input:focus {
+          outline: none; border-color: rgba(255,255,255,0.62); background: rgba(0,0,0,0.24);
+        }
+        /* 数字框自带的步进箭头在窄面板里挤版，隐掉 */
+        #linuxdo-auto-panel .floor-input::-webkit-inner-spin-button,
+        #linuxdo-auto-panel .floor-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+        #linuxdo-auto-panel .floor-check {
+          display: flex; align-items: center; gap: 6px; flex: 1;
+          font-size: 11px; color: rgba(255,255,255,0.76); cursor: pointer;
+        }
+        #linuxdo-auto-panel .floor-check input {
+          width: 13px; height: 13px; margin: 0; flex: none;
+          accent-color: #fff; cursor: pointer;
+        }
+
         /* 动作按钮 */
         #linuxdo-auto-panel .action-btn {
           width: 100%; margin-top: 8px; padding: 9px; border: 0; border-radius: 10px;
@@ -1239,6 +1352,21 @@
             <button class="speed-btn like-btn ${enableLike?'active':''}" data-like="true">开启</button>
             <button class="speed-btn like-btn ${!enableLike?'active':''}" data-like="false">关闭</button>
           </div></div>
+          <div class="row"><span class="row-label">概率</span><div class="seg">
+            <button class="speed-btn chance-btn ${currentLikeChance==='low'?'active':''}" data-chance="low" title="约 5% 概率点赞">低</button>
+            <button class="speed-btn chance-btn ${currentLikeChance==='medium'?'active':''}" data-chance="medium" title="约 15% 概率点赞">中</button>
+            <button class="speed-btn chance-btn ${currentLikeChance==='high'?'active':''}" data-chance="high" title="约 25% 概率点赞">高</button>
+            <button class="speed-btn chance-btn ${currentLikeChance==='veryHigh'?'active':''}" data-chance="veryHigh" title="约 40% 概率点赞">极高</button>
+          </div></div>
+          <div class="row"><span class="row-label">楼层</span>
+            <input type="number" class="floor-input" id="floor-limit-input" min="0" step="1"
+              placeholder="不限" title="每帖只浏览前 N 楼后换下一帖，留空或 0 表示不限">
+          </div>
+          <div class="row"><span class="row-label"></span>
+            <label class="floor-check" title="开启后已读楼层滚过不计数，只数上次阅读位置之后的新楼层">
+              <input type="checkbox" id="floor-unread-only">只计未读楼层
+            </label>
+          </div>
           <button class="action-btn btn-start" id="btn-auto-start">开始自动浏览</button>
           <button class="action-btn btn-stop" id="btn-auto-stop" style="display:none;">停止运行</button>
           <button class="action-btn btn-clear" id="btn-clear-history">清除浏览记录</button>
@@ -1281,6 +1409,25 @@
         document.querySelectorAll('.like-btn[data-like]').forEach(b => b.classList.remove('active'));
         e.target.classList.add('active');
       }));
+      document.querySelectorAll('.chance-btn[data-chance]').forEach(btn => btn.addEventListener('click', (e) => {
+        setLikeChance(e.target.dataset.chance);
+        document.querySelectorAll('.chance-btn[data-chance]').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+      }));
+
+      const floorInput = document.getElementById('floor-limit-input');
+      floorInput.value = floorLimit > 0 ? floorLimit : '';
+      // Discourse 绑了一堆单键快捷键（j/k 翻楼等），输入框里的按键不能冒泡出去
+      floorInput.addEventListener('keydown', (e) => e.stopPropagation());
+      floorInput.addEventListener('change', (e) => {
+        setFloorLimit(e.target.value);
+        // 回写规范化后的值：负数、小数、非法输入统一显示成实际生效的值
+        e.target.value = floorLimit > 0 ? floorLimit : '';
+      });
+
+      const floorCheck = document.getElementById('floor-unread-only');
+      floorCheck.checked = floorLimitUnreadOnly;
+      floorCheck.addEventListener('change', (e) => setFloorLimitUnreadOnly(e.target.checked));
 
       document.getElementById('page-type').textContent = getPageType();
     }

@@ -39,7 +39,9 @@ linuxdo/
 - **智能去重** - 已浏览帖子标记存储，避免重复浏览
 - **完整回复浏览** - 帖子详情页滚动浏览所有回复直到底部
 - **自动循环** - 浏览完成后自动返回列表继续下一个未浏览话题
-- **随机点赞** - 按概率随机点赞，带间隔控制
+- **随机点赞** - 按概率随机点赞（概率低/中/高/极高可在面板调节），带间隔控制
+- **楼层限制** - 可设定每帖只浏览前 N 楼后换下一帖，并可选择只按未读楼层计数
+- **断点续读** - 进入读过一部分的帖子时自动点击时间线「返回」，跳回上次读到的楼层继续
 - **阅读量统计** - 监听 /topics/timings 阅读上报接口，面板实时显示本次总阅读量，页面刷新不清零
 - **可视化控制面板** - 实时显示状态和统计数据，默认收起为悬浮球，可拖动到页面任意位置
 - **视觉标记** - 已浏览话题显示绿色勾号，透明度降低
@@ -48,11 +50,12 @@ linuxdo/
 ## 快速开始
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 浏览器扩展
-2. 创建新脚本，复制 `src/linuxdo-automation.user.js` 内容
-3. 保存并启用脚本
-4. 访问 https://linux.do 并登录
-5. 页面右下角会出现紫色悬浮球，点击展开控制面板（拖动可移到任意位置）
-6. 点击"开始自动浏览"
+2. [**点此一键安装**](https://raw.githubusercontent.com/liasica/linuxdo/feature/src/linuxdo-automation.user.js) —— Tampermonkey 会自动弹出安装确认页（也可手动新建脚本，复制 `src/linuxdo-automation.user.js` 内容）
+3. 访问 https://linux.do 并登录
+4. 页面右下角会出现紫色悬浮球，点击展开控制面板（拖动可移到任意位置）
+5. 按需设置速度、列表、点赞与楼层限制，点击"开始自动浏览"
+
+脚本已声明 `@updateURL`，安装后 Tampermonkey 会自动检查更新；`@name` 不含版本号，升级时直接覆盖安装即可。
 
 ### 工作流程
 
@@ -85,10 +88,10 @@ linuxdo/
 
 | 功能 | 实现方式 |
 |------|---------|
-| 点赞 | 点击 `button[title="点赞此帖子"]` |
+| 点赞 | 调用 discourse-reactions API（`heart/toggle`），已赞检测 `.discourse-reactions-actions` |
 | 帖子识别 | `article[id^="post_"]` |
 | CSRF Token | `meta[name="csrf-token"]` |
-| 登录检测 | `#current-user` 元素存在 |
+| 登录检测 | 解析 `#data-preloaded`（JSON）中的 `currentUser` |
 
 ## 文档索引
 
@@ -165,12 +168,12 @@ pageAnalyzer.getScrollInfo()     // 获取滚动状态
 
 | 元素 | 选择器 |
 |------|--------|
-| 点赞按钮 | `button[title="点赞此帖子"]` |
+| 点赞按钮 | `button.btn-toggle-reaction-like`（旧版 `button[title="点赞此帖子"]` 已失效）|
 | 帖子容器 | `article[id^="post_"]` |
 | 话题链接 | `a[href*="/t/topic/"]` |
 | 话题行 | `.topic-list-item, tr[data-topic-id]` |
 | CSRF Token | `meta[name="csrf-token"]` |
-| 登录状态 | `#current-user` |
+| 登录状态 | `#data-preloaded`（含 `currentUser`），回退 `#current-user` |
 
 ### 数据存储
 
@@ -183,6 +186,8 @@ pageAnalyzer.getScrollInfo()     // 获取滚动状态
 | `linuxdo_auto_running` | 自动运行状态 (用于页面跳转后恢复) |
 | `linuxdo_session_read_keys` | 本次总阅读量去重键列表，「话题ID:楼层号」(JSON数组) |
 | `linuxdo_session_read_epoch` | 阅读量清零代次标记 (用于多标签页同步) |
+| `linuxdo_floor_limit` | 每帖浏览楼层上限 (0 表示不限) |
+| `linuxdo_floor_limit_unread_only` | 楼层限制是否只计未读楼层 |
 
 ### 扩展开发
 
@@ -201,6 +206,19 @@ pageAnalyzer.getScrollInfo()     // 获取滚动状态
 4. 部分功能需要特定用户等级权限
 
 ## 更新日志
+
+### v2.4.1 (2026-08-31)
+- **修复** - 登录检测适配 Discourse 新版页面结构：`#data-preloaded` 由 `<div data-preloaded="...">` 变为 `<script type="application/json">`，数据移到文本内容里；改为优先读 `textContent`、回退 `dataset` 兼容旧版，恢复「服务端直出即时判定登录、避免与 Ember 渲染竞速」（旧代码在新版会退化为依赖异步渲染的 `#current-user`，慢环境下刷新后面板可能不显示）
+- **新增** - 控制面板补上点赞概率选择器（低 5% / 中 15% / 高 25% / 极高 40%）：概率预设与 `setLikeChance()` 早已就绪却未接入 UI，此前只能改 GM 存储值
+- **清理** - 移除死代码 `checkLikeLimitDialog()`、精简 `handleLikeLimit()`：点赞走 API 直连，命中 429 直接关点赞开关，不再检测或关闭 UI 对话框
+- **其他** - 统一注释标点为全角
+
+### v2.4.0 (2026-08-31)
+- **新增** - 楼层限制：面板可填写每帖只浏览前 N 楼，读满即换下一帖，留空或 0 表示不限
+- **新增** - 楼层限制可勾选「只计未读楼层」，已读楼层滚过不计数，只数上次阅读位置之后的新楼层
+- **新增** - 断点续读：进入读过一部分的帖子时，自动点击右侧时间线的「返回」跳回上次读到的楼层继续，不再从第一楼重刷已读内容
+- **变更** - `@name` 去掉版本号，升级时可直接覆盖安装；补充 `@downloadURL` 与 `@updateURL` 支持自动更新
+- **其他** - README 补充一键安装链接；新增仓库 `.gitignore`
 
 ### v2.3.0 (2026-08-31)
 - **新增** - 控制面板可拖动：按住标题栏（收起态即悬浮球本身）拖到页面任意位置，松手后记住位置，窗口缩放时自动收回可视范围内
