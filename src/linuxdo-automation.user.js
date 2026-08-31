@@ -1135,10 +1135,12 @@
         #linuxdo-auto-panel.minimized.running::before {
           content: ''; position: absolute; top: 3px; right: 3px; width: 10px; height: 10px;
           border-radius: 50%; background: #22c55e; border: 2px solid rgba(255,255,255,0.92);
+          pointer-events: none;
         }
         #linuxdo-auto-panel.minimized.running::after {
           content: ''; position: absolute; inset: -3px; border-radius: 50%;
           border: 2px solid rgba(74,222,128,0.7); animation: fab-pulse 1.8s ease-out infinite;
+          pointer-events: none;
         }
         @keyframes fab-pulse {
           0% { transform: scale(1); opacity: .8; }
@@ -1161,7 +1163,9 @@
         #linuxdo-auto-panel .btn-minimize:hover { background: rgba(255,255,255,0.3); }
 
         #linuxdo-auto-panel .panel-content { padding: 0 14px 14px; animation: panel-in .18s ease; }
+        #linuxdo-auto-panel.closing .panel-content { animation: panel-out .16s ease forwards; }
         @keyframes panel-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+        @keyframes panel-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-4px); } }
 
         /* 分段选择器 */
         #linuxdo-auto-panel .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
@@ -1377,13 +1381,36 @@
       if (Number.isFinite(left)) this.setPosition(left, pos.top);
     }
 
+    // 展开由 CSS 的 panel-in 负责淡入；收起要先把内容淡出再变回悬浮球，两边动画才对称
     toggleMinimize() {
+      const panel = this.panel;
+      if (panel.classList.contains('minimized')) {
+        this.setMinimized(false);
+        return;
+      }
+      if (panel.classList.contains('closing')) return;
+
+      panel.classList.add('closing');
+      const content = panel.querySelector('.panel-content');
+      const done = () => {
+        clearTimeout(timer);
+        content.removeEventListener('animationend', done);
+        // 先切成悬浮球把内容藏起来，再摘 closing，否则会闪一下入场动画
+        this.setMinimized(true);
+        panel.classList.remove('closing');
+      };
+      content.addEventListener('animationend', done);
+      // 标签页切到后台时 animationend 不一定触发，兜底收尾
+      const timer = setTimeout(done, 400);
+    }
+
+    setMinimized(minimized) {
       const panel = this.panel;
       const before = panel.getBoundingClientRect();
       // 面板在屏幕右半边时保持右边缘不动，展开才不会往视口外顶
       const keepRight = before.left + before.width / 2 > window.innerWidth / 2;
 
-      const minimized = panel.classList.toggle('minimized');
+      panel.classList.toggle('minimized', minimized);
       Storage.set('panel_minimized', minimized);
 
       if (panel.style.left) {
