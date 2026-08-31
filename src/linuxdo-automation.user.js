@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do 自动浏览助手
 // @namespace    https://linux.do/
-// @version      2.4.1
+// @version      2.4.2
 // @description  自动浏览帖子、滚动查看所有回复、随机点赞、避免重复浏览、可限定每帖浏览楼层数
 // @author       Assistant
 // @match        https://linux.do/*
@@ -161,6 +161,9 @@
           btn.classList.add('active');
         }
       });
+      // 点赞关闭时概率选项没有意义，整行收起
+      const chanceRow = document.getElementById('like-chance-row');
+      if (chanceRow) chanceRow.classList.toggle('hidden', !enabled);
     }
   }
 
@@ -1258,6 +1261,7 @@
 
         /* 分段选择器 */
         #linuxdo-auto-panel .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+        #linuxdo-auto-panel .row.hidden { display: none; }
         #linuxdo-auto-panel .row-label { flex: none; width: 28px; font-size: 12px; color: rgba(255,255,255,0.72); }
         #linuxdo-auto-panel .seg { display: flex; flex: 1; gap: 2px; padding: 2px; background: rgba(0,0,0,0.16); border-radius: 9px; }
         #linuxdo-auto-panel .speed-btn {
@@ -1291,6 +1295,11 @@
         #linuxdo-auto-panel .floor-check input {
           width: 13px; height: 13px; margin: 0; flex: none;
           accent-color: #fff; cursor: pointer;
+        }
+        /* 控件下方的说明文字，左边距对齐控件（标签 28px + 间距 10px） */
+        #linuxdo-auto-panel .row-hint {
+          margin: -4px 0 8px 38px; font-size: 10px; line-height: 1.5;
+          color: rgba(255,255,255,0.58);
         }
 
         /* 动作按钮 */
@@ -1352,7 +1361,7 @@
             <button class="speed-btn like-btn ${enableLike?'active':''}" data-like="true">开启</button>
             <button class="speed-btn like-btn ${!enableLike?'active':''}" data-like="false">关闭</button>
           </div></div>
-          <div class="row"><span class="row-label">概率</span><div class="seg">
+          <div class="row${enableLike?'':' hidden'}" id="like-chance-row"><span class="row-label">概率</span><div class="seg">
             <button class="speed-btn chance-btn ${currentLikeChance==='low'?'active':''}" data-chance="low" title="约 5% 概率点赞">低</button>
             <button class="speed-btn chance-btn ${currentLikeChance==='medium'?'active':''}" data-chance="medium" title="约 15% 概率点赞">中</button>
             <button class="speed-btn chance-btn ${currentLikeChance==='high'?'active':''}" data-chance="high" title="约 25% 概率点赞">高</button>
@@ -1362,11 +1371,13 @@
             <input type="number" class="floor-input" id="floor-limit-input" min="0" step="1"
               placeholder="不限" title="每帖只浏览前 N 楼后换下一帖，留空或 0 表示不限">
           </div>
+          <div class="row-hint">填 N 则每帖读到第 N 楼就换下一帖，留空或填 0 表示整帖读完</div>
           <div class="row"><span class="row-label"></span>
             <label class="floor-check" title="开启后已读楼层滚过不计数，只数上次阅读位置之后的新楼层">
               <input type="checkbox" id="floor-unread-only">只计未读楼层
             </label>
           </div>
+          <div class="row-hint">默认按楼层号数到第 N 楼；勾选后从上次读到的位置往后数 N 楼，已读楼层不计入</div>
           <button class="action-btn btn-start" id="btn-auto-start">开始自动浏览</button>
           <button class="action-btn btn-stop" id="btn-auto-stop" style="display:none;">停止运行</button>
           <button class="action-btn btn-clear" id="btn-clear-history">清除浏览记录</button>
