@@ -1,0 +1,18 @@
+# 系统文件
+.DS_Store
+._*
+Thumbs.db
+
+# 编辑器与 IDE
+.idea/
+.vscode/
+*.swp
+
+# Node 依赖与日志
+node_modules/
+*.log
+
+# 本地配置与密钥
+.env
+.env.*
+.claude/settings.local.json
